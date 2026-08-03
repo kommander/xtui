@@ -75,17 +75,24 @@ const MEDIA_MIN_ROWS = 5
 const MEDIA_MAX_ROWS = 18
 const POST_PREVIEW_GRAPHEMES = 280
 const X_API_BASE_URL = "https://api.x.com"
+const COMMENTS_PAGE_SIZE = 100
 const FEED_BINDINGS = {
   "x.feed.next": "j",
   "x.feed.previous": "k",
   "x.feed.open": "o",
+  "x.feed.comments": "c",
   "x.feed.refresh": "r",
   "x.feed.toggle-expanded": "e",
   "x.feed.switch-stream": "tab",
   "x.session.open": "a",
 } as const
+const COMMENTS_BINDINGS = {
+  "x.comments.back": "escape",
+} as const
 const APP_BINDINGS = {
-  "app.quit": "q",
+  "app.quit": "ctrl+c",
+} as const
+const VIEW_BINDINGS = {
   "app.console": "`",
 } as const
 
@@ -101,6 +108,7 @@ interface CookieSource {
 export interface XDemoRunOptions {
   detectedBrowsers?: BrowserSourceId[]
   xApiBaseUrl?: string
+  twitterClientFactory?: (options: ConstructorParameters<typeof TwitterClient>[0]) => TwitterClient
 }
 
 function safeDirectories(root: string): string[] {
@@ -318,14 +326,28 @@ interface XApiResponse<T> {
 type ConnectionMode = "official" | "cookie"
 type TimelineStream = "home" | "following"
 type ModalRoute = "connection" | "official-token" | "cookie-risk" | "cookie-auth" | "browser"
+type AppView = "timeline" | "comments"
+
+interface CommentsPage {
+  tweets: TweetData[]
+  nextCursor: string | null
+}
+
+interface TimelineReturnState {
+  scrollTop: number
+  status: StyledText
+}
 
 const rendererKeymaps = new WeakMap<CliRenderer, Keymap<Renderable, KeyEvent>>()
 
 let root: BoxRenderable | null = null
 let currentRenderer: CliRenderer | null = null
 let feed: ScrollBoxRenderable | null = null
+let commentsFeed: ScrollBoxRenderable | null = null
 let statusText: TextRenderable | null = null
 let headerText: TextRenderable | null = null
+let footer: BoxRenderable | null = null
+let footerText: TextRenderable | null = null
 let emptyState: BoxRenderable | null = null
 let authOverlay: BoxRenderable | null = null
 let authInput: InputRenderable | null = null
@@ -362,6 +384,18 @@ let browserRouteSources: CookieSource[] = []
 let keymapDisposers: Array<() => void> = []
 let activeKeymap: Keymap<Renderable, KeyEvent> | null = null
 let xApiBaseUrl = X_API_BASE_URL
+let currentView: AppView = "timeline"
+let timelineReturnState: TimelineReturnState | null = null
+let commentsRootTweet: TweetData | null = null
+let commentCards: BoxRenderable[] = []
+let commentTweetIds = new Set<string>()
+let commentsCursor: string | null = null
+let commentsHasMore = false
+let commentsLoading = false
+let commentsGeneration = 0
+let commentsStateText: TextRenderable | null = null
+let commentsScrollListener: (() => void) | null = null
+let twitterClientFactory = (options: ConstructorParameters<typeof TwitterClient>[0]) => new TwitterClient(options)
 
 function sourceKey(cookie: Cookie, browser: BrowserName): string {
   return JSON.stringify([cookie.source?.browser ?? browser, cookie.source?.profile ?? "", cookie.source?.storeId ?? ""])
@@ -545,6 +579,40 @@ function officialWrapperUrls(post: XApiPost): string[] {
     .map((entity) => entity.url)
 }
 
+function mapOfficialPosts(response: XApiResponse<XApiPost[]>, fallbackAuthor: XApiUser): TweetData[] {
+  const posts = response.data ?? []
+  const users = new Map((response.includes?.users ?? []).map((user) => [user.id, user]))
+  const mediaByKey = new Map((response.includes?.media ?? []).map((media) => [media.media_key, media]))
+  const includedTweets = new Map((response.includes?.tweets ?? []).map((tweet) => [tweet.id, tweet]))
+  const mapPost = (post: XApiPost, authorFallback: XApiUser, hydrateQuote: boolean): TweetData => {
+    const author = (post.author_id ? users.get(post.author_id) : undefined) ?? authorFallback
+    const tweet: TweetData & { wrapperUrls?: string[] } = {
+      id: post.id,
+      text: post.text,
+      author: {
+        name: author.name,
+        username: author.username,
+        profileImageUrl: author.profile_image_url,
+      } as TweetData["author"] & { profileImageUrl?: string },
+      authorId: post.author_id,
+      createdAt: post.created_at,
+      replyCount: post.public_metrics?.reply_count,
+      retweetCount: post.public_metrics?.retweet_count,
+      likeCount: post.public_metrics?.like_count,
+      media: mapOfficialMedia(post, mediaByKey),
+      wrapperUrls: officialWrapperUrls(post),
+    }
+    if (hydrateQuote) {
+      const reference = post.referenced_tweets?.find((item) => item.type === "quoted")
+      const quotedPost = reference ? includedTweets.get(reference.id) : undefined
+      const quotedAuthor = quotedPost?.author_id ? users.get(quotedPost.author_id) : undefined
+      if (quotedPost && quotedAuthor) tweet.quotedTweet = mapPost(quotedPost, quotedAuthor, false)
+    }
+    return tweet
+  }
+  return posts.map((post) => mapPost(post, fallbackAuthor, true))
+}
+
 async function fetchOfficialTimeline(
   paginationToken?: string,
   requestGeneration: number = generation,
@@ -575,43 +643,49 @@ async function fetchOfficialTimeline(
     `/2/users/${encodeURIComponent(officialUser.id)}/timelines/reverse_chronological?${params.toString()}`,
     token,
   )
-  const posts = data.data ?? []
-  const users = new Map((data.includes?.users ?? []).map((user) => [user.id, user]))
-  const mediaByKey = new Map((data.includes?.media ?? []).map((media) => [media.media_key, media]))
-  const includedTweets = new Map((data.includes?.tweets ?? []).map((tweet) => [tweet.id, tweet]))
-  const mapPost = (post: XApiPost, fallbackAuthor: XApiUser, hydrateQuote: boolean): TweetData => {
-    const author = (post.author_id ? users.get(post.author_id) : undefined) ?? fallbackAuthor
-    const tweet: TweetData & { wrapperUrls?: string[] } = {
-      id: post.id,
-      text: post.text,
-      author: {
-        name: author.name,
-        username: author.username,
-        profileImageUrl: author.profile_image_url,
-      } as TweetData["author"] & { profileImageUrl?: string },
-      authorId: post.author_id,
-      createdAt: post.created_at,
-      replyCount: post.public_metrics?.reply_count,
-      retweetCount: post.public_metrics?.retweet_count,
-      likeCount: post.public_metrics?.like_count,
-      media: mapOfficialMedia(post, mediaByKey),
-      wrapperUrls: officialWrapperUrls(post),
-    }
-    if (hydrateQuote) {
-      const reference = post.referenced_tweets?.find((item) => item.type === "quoted")
-      const quotedPost = reference ? includedTweets.get(reference.id) : undefined
-      const quotedAuthor = quotedPost?.author_id ? users.get(quotedPost.author_id) : undefined
-      if (quotedPost && quotedAuthor) tweet.quotedTweet = mapPost(quotedPost, quotedAuthor, false)
-    }
-    return tweet
-  }
-  const tweets = posts.map((post) => mapPost(post, officialUser!, true))
+  const tweets = mapOfficialPosts(data, officialUser)
 
   return {
     tweets,
     nextToken: data.meta?.next_token ?? null,
     rateLimitRemaining: response.headers.get("x-rate-limit-remaining"),
   }
+}
+
+async function fetchOfficialComments(tweetId: string, paginationToken?: string): Promise<CommentsPage> {
+  const token = officialToken
+  if (!token || !officialUser) throw new Error("An active X API session is required.")
+
+  const params = new URLSearchParams({
+    query: `in_reply_to_tweet_id:${tweetId}`,
+    sort_order: "recency",
+    max_results: String(COMMENTS_PAGE_SIZE),
+    "tweet.fields": "attachments,author_id,created_at,entities,public_metrics,referenced_tweets",
+    expansions:
+      "attachments.media_keys,author_id,referenced_tweets.id,referenced_tweets.id.attachments.media_keys,referenced_tweets.id.author_id",
+    "user.fields": "id,name,profile_image_url,username",
+    "media.fields": "duration_ms,height,media_key,preview_image_url,type,url,width",
+  })
+  if (paginationToken) params.set("next_token", paginationToken)
+  const { data } = await fetchXApi<XApiPost[]>(`/2/tweets/search/recent?${params.toString()}`, token)
+  return {
+    tweets: mapOfficialPosts(data, officialUser),
+    nextCursor: data.meta?.next_token ?? null,
+  }
+}
+
+async function fetchCommentsPage(tweetId: string, cursor?: string): Promise<CommentsPage> {
+  if (connectionMode === "official") return fetchOfficialComments(tweetId, cursor)
+  if (!client) throw new Error("An active browser session is required.")
+
+  const result = await client.getRepliesPaged(tweetId, {
+    maxPages: 1,
+    cursor,
+    pageDelayMs: 0,
+    includeRaw: true,
+  })
+  if (!result.success) throw new Error(result.error)
+  return { tweets: result.tweets, nextCursor: result.nextCursor ?? null }
 }
 
 function compactCount(value: number | undefined): string {
@@ -639,14 +713,25 @@ function formatKeyLabel(key: string): string {
   return (activeKeymap?.formatKey(key, { preferDisplay: true }) ?? key).toUpperCase()
 }
 
-function formatCommandKey(command: keyof typeof FEED_BINDINGS | keyof typeof APP_BINDINGS | "x.modal.back"): string {
+type CommandName =
+  | keyof typeof FEED_BINDINGS
+  | keyof typeof COMMENTS_BINDINGS
+  | keyof typeof APP_BINDINGS
+  | keyof typeof VIEW_BINDINGS
+  | "x.modal.back"
+
+function formatCommandKey(command: CommandName): string {
   const bindings = activeKeymap?.getCommandBindings({ visibility: "registered", commands: [command] }).get(command)
   const fallback =
     command === "x.modal.back"
       ? "esc"
       : command in FEED_BINDINGS
         ? FEED_BINDINGS[command as keyof typeof FEED_BINDINGS]
-        : APP_BINDINGS[command as keyof typeof APP_BINDINGS]
+        : command in COMMENTS_BINDINGS
+          ? COMMENTS_BINDINGS[command as keyof typeof COMMENTS_BINDINGS]
+          : command in APP_BINDINGS
+            ? APP_BINDINGS[command as keyof typeof APP_BINDINGS]
+            : VIEW_BINDINGS[command as keyof typeof VIEW_BINDINGS]
   return (
     formatCommandBindings(bindings, {
       keyNameAliases: { escape: "esc" },
@@ -657,6 +742,11 @@ function formatCommandKey(command: keyof typeof FEED_BINDINGS | keyof typeof APP
 
 function updateHeader(): void {
   if (!headerText) return
+  if (currentView === "comments") {
+    const username = commentsRootTweet?.author.username
+    headerText.content = t`${bold(fg(COLORS.primary)("X"))}  ${underline(bold(fg(COLORS.primary)("COMMENTS")))}  ${fg(COLORS.secondary)(username ? `@${username}` : "")}  ${dim(fg(COLORS.secondary)(`${formatCommandKey("x.comments.back")} BACK · READ-ONLY`))}`
+    return
+  }
   const home =
     currentStream === "home" && connectionMode !== "official"
       ? underline(bold(fg(COLORS.primary)("HOME")))
@@ -664,6 +754,19 @@ function updateHeader(): void {
   const following =
     currentStream === "following" ? underline(bold(fg(COLORS.primary)("FOLLOWING"))) : fg(COLORS.muted)("FOLLOWING")
   headerText.content = t`${bold(fg(COLORS.primary)("X"))}  ${home}  ${following}  ${dim(fg(COLORS.secondary)(`${formatCommandKey("x.feed.switch-stream")} SWITCH · READ-ONLY`))}`
+}
+
+function updateFooter(): void {
+  if (!footerText) return
+  const quitKey = formatCommandKey("app.quit")
+  const consoleKey = formatCommandKey("app.console")
+  if (currentView === "comments") {
+    footerText.content = t`${bold(fg(COLORS.accent)(`${formatKeyLabel("up")}/${formatKeyLabel("down")}`))} ${fg(COLORS.secondary)("scroll")}   ${bold(fg(COLORS.accent)(formatCommandKey("x.comments.back")))} ${fg(COLORS.secondary)("back")}   ${bold(fg(COLORS.secondary)(consoleKey))} ${fg(COLORS.secondary)("logs")}   ${bold(fg(COLORS.error)(quitKey))} ${fg(COLORS.secondary)("quit")}`
+    return
+  }
+
+  const selectionKeys = `${formatCommandKey("x.feed.next")}/${formatCommandKey("x.feed.previous")}`
+  footerText.content = t`${bold(fg(COLORS.accent)(selectionKeys))} ${fg(COLORS.secondary)("select")}   ${bold(fg(COLORS.accent)(formatCommandKey("x.feed.comments")))} ${fg(COLORS.secondary)("comments")}   ${bold(fg(COLORS.accent)(formatCommandKey("x.feed.open")))} ${fg(COLORS.secondary)("open")}   ${bold(fg(COLORS.green)(formatCommandKey("x.feed.refresh")))} ${fg(COLORS.secondary)("refresh")}   ${bold(fg(COLORS.amber)(formatCommandKey("x.session.open")))} ${fg(COLORS.secondary)("session")}   ${bold(fg(COLORS.error)(quitKey))} ${fg(COLORS.secondary)("quit")}`
 }
 
 function resetPaginationState(): void {
@@ -825,14 +928,17 @@ function postAuthorContent(tweet: TweetData) {
   return t`${bold(fg(COLORS.primary)(tweet.author.name || username))} ${fg(COLORS.secondary)(`@${username}`)} ${fg(COLORS.muted)(timestamp ? `· ${timestamp}` : "")}`
 }
 
-function postBodyContent(tweet: TweetData, expanded: boolean = false) {
+function postBodyContent(tweet: TweetData, expanded: boolean = false, showToggle: boolean = true) {
   const article = tweet.article?.title ? `\nARTICLE · ${tweet.article.title}` : ""
   const preview = postPreview(displayPostText(tweet), expanded)
-  const toggle = preview.isLong
-    ? bold(
-        fg(COLORS.amber)(`\n\n[${formatCommandKey("x.feed.toggle-expanded")}] ${expanded ? "Show Less" : "Show More"}`),
-      )
-    : null
+  const toggle =
+    showToggle && preview.isLong
+      ? bold(
+          fg(COLORS.amber)(
+            `\n\n[${formatCommandKey("x.feed.toggle-expanded")}] ${expanded ? "Show Less" : "Show More"}`,
+          ),
+        )
+      : null
 
   const chunks = [...styledMentions(preview.text).chunks]
   if (article) chunks.push(bold(fg(COLORS.amber)(article)))
@@ -840,9 +946,9 @@ function postBodyContent(tweet: TweetData, expanded: boolean = false) {
   return new StyledText(chunks)
 }
 
-function addPostMetrics(card: BoxRenderable, tweet: TweetData, index: number): void {
+function addPostMetrics(card: BoxRenderable, tweet: TweetData, index: number, idPrefix: string = "x-post"): void {
   const row = new BoxRenderable(card.ctx, {
-    id: `x-post-footer-${index}`,
+    id: `${idPrefix}-footer-${index}`,
     width: "100%",
     height: 1,
     marginTop: 1,
@@ -856,7 +962,7 @@ function addPostMetrics(card: BoxRenderable, tweet: TweetData, index: number): v
   ] as const
   for (const metric of metrics) {
     const cell = new BoxRenderable(card.ctx, {
-      id: `x-post-${metric.id}-${index}`,
+      id: `${idPrefix}-${metric.id}-${index}`,
       height: 1,
       flexDirection: "row",
       flexBasis: 0,
@@ -953,7 +1059,7 @@ function addPostAuthor(card: BoxRenderable, tweet: TweetData, postIndex: number,
       failureReported = true
       reportImageFailure(
         {
-          kind: idPrefix === "x-post-quote" ? "quoted-avatar" : "avatar",
+          kind: idPrefix.includes("-quote") ? "quoted-avatar" : "avatar",
           postId: tweet.id,
           source: avatarUrl,
         },
@@ -1038,7 +1144,7 @@ function addPostMedia(
       failureReported = true
       const reason = reportImageFailure(
         {
-          kind: idPrefix === "x-post-quote-media" ? "quoted-media" : "media",
+          kind: idPrefix.includes("quote-media") ? "quoted-media" : "media",
           postId: tweet.id,
           mediaIndex,
           mediaType: media.type,
@@ -1079,12 +1185,12 @@ function addPostMedia(
   card.add(mediaBox)
 }
 
-function addQuotedPost(card: BoxRenderable, tweet: TweetData, postIndex: number): void {
+function addQuotedPost(card: BoxRenderable, tweet: TweetData, postIndex: number, idPrefix: string = "x-post"): void {
   const quoted = tweet.quotedTweet
   if (!quoted) return
 
   const quoteCard = new BoxRenderable(card.ctx, {
-    id: `x-post-quote-${postIndex}`,
+    id: `${idPrefix}-quote-${postIndex}`,
     width: "100%",
     flexDirection: "column",
     flexShrink: 0,
@@ -1095,17 +1201,17 @@ function addQuotedPost(card: BoxRenderable, tweet: TweetData, postIndex: number)
     borderColor: COLORS.border,
     backgroundColor: COLORS.panel,
   })
-  addPostAuthor(quoteCard, quoted, postIndex, "x-post-quote")
+  addPostAuthor(quoteCard, quoted, postIndex, `${idPrefix}-quote`)
   quoteCard.add(
     new TextRenderable(card.ctx, {
-      id: `x-post-quote-content-${postIndex}`,
+      id: `${idPrefix}-quote-content-${postIndex}`,
       content: styledMentions(cleanPostText(displayPostText(quoted)), COLORS.secondary),
       width: "100%",
       wrapMode: "word",
       selectable: true,
     }),
   )
-  addPostMedia(quoteCard, quoted, postIndex, "x-post-quote-media")
+  addPostMedia(quoteCard, quoted, postIndex, `${idPrefix}-quote-media`)
   card.add(quoteCard)
 }
 
@@ -1241,6 +1347,43 @@ function createPostCard(tweet: TweetData, index: number): BoxRenderable | null {
   return card
 }
 
+function createCommentsPostCard(
+  destination: ScrollBoxRenderable,
+  tweet: TweetData,
+  index: number,
+  idPrefix: "x-comments-root" | "x-comment",
+): BoxRenderable {
+  const isRoot = idPrefix === "x-comments-root"
+  const card = new BoxRenderable(destination.ctx, {
+    id: `${idPrefix}-${tweet.id}`,
+    width: "100%",
+    paddingLeft: 1,
+    paddingRight: 1,
+    marginBottom: isRoot ? 1 : 0,
+    backgroundColor: isRoot ? COLORS.panel : COLORS.card,
+    border: true,
+    borderStyle: isRoot ? "double" : "rounded",
+    borderColor: isRoot ? COLORS.borderActive : COLORS.border,
+    title: isRoot ? "SELECTED POST" : undefined,
+    titleColor: isRoot ? COLORS.accent : undefined,
+    flexShrink: 0,
+  })
+  addPostAuthor(card, tweet, index, idPrefix)
+  card.add(
+    new TextRenderable(destination.ctx, {
+      id: `${idPrefix}-content-${index}`,
+      content: postBodyContent(tweet, true, false),
+      width: "100%",
+      wrapMode: "word",
+      selectable: true,
+    }),
+  )
+  addPostMedia(card, tweet, index, `${idPrefix}-media`)
+  addQuotedPost(card, tweet, index, idPrefix)
+  addPostMetrics(card, tweet, index, idPrefix)
+  return card
+}
+
 function appendTweets(tweets: readonly TweetData[]): number {
   if (!feed) return 0
   let added = 0
@@ -1269,6 +1412,109 @@ function showTweets(tweets: readonly TweetData[]): void {
 function setStatus(message: string, color: string): void {
   if (!statusText) return
   statusText.content = t`${bold(fg(color)("●"))} ${fg(COLORS.secondary)(message)}`
+}
+
+function clearCommentsContent(): void {
+  for (const card of commentCards) card.destroyRecursively()
+  commentCards = []
+  commentTweetIds.clear()
+  commentsStateText?.destroyRecursively()
+  commentsStateText = null
+  if (!commentsFeed) return
+  for (const child of commentsFeed.getChildren().toReversed()) child.destroyRecursively()
+}
+
+function setCommentsState(message: string, color: string = COLORS.secondary): void {
+  if (!commentsStateText) return
+  commentsStateText.content = t`${bold(fg(color)(message))}`
+}
+
+function appendComments(tweets: readonly TweetData[]): number {
+  if (!commentsFeed || !commentsStateText) return 0
+  let added = 0
+  for (const tweet of tweets) {
+    if (tweet.id === commentsRootTweet?.id || commentTweetIds.has(tweet.id)) continue
+    const card = createCommentsPostCard(commentsFeed, tweet, commentCards.length, "x-comment")
+    commentTweetIds.add(tweet.id)
+    commentCards.push(card)
+    commentsFeed.insertBefore(card, commentsStateText)
+    added += 1
+  }
+  return added
+}
+
+function closeCommentsView(): boolean {
+  if (currentView !== "comments" || !root || !feed || !commentsFeed || !footer) return false
+  commentsGeneration += 1
+  commentsLoading = false
+  commentsHasMore = false
+  root.remove(commentsFeed)
+  root.insertBefore(feed, footer)
+  currentView = "timeline"
+  commentsRootTweet = null
+  updateHeader()
+  updateFooter()
+  if (timelineReturnState && statusText) statusText.content = timelineReturnState.status
+  feed.scrollTop = timelineReturnState?.scrollTop ?? feed.scrollTop
+  timelineReturnState = null
+  feed.focus()
+  clearCommentsContent()
+  return true
+}
+
+function openCommentsView(): boolean {
+  if (
+    currentView !== "timeline" ||
+    !root ||
+    !feed ||
+    !commentsFeed ||
+    !footer ||
+    !statusText ||
+    !connectionMode ||
+    loading ||
+    loadingMore
+  )
+    return false
+  const tweet = timelineTweets[selectedIndex]
+  if (!tweet) return false
+
+  commentsGeneration += 1
+  commentsLoading = false
+  commentsCursor = null
+  commentsHasMore = true
+  commentsRootTweet = tweet
+  timelineReturnState = { scrollTop: feed.scrollTop, status: statusText.content }
+  clearCommentsContent()
+  commentsFeed.scrollTop = 0
+  commentsFeed.add(createCommentsPostCard(commentsFeed, tweet, 0, "x-comments-root"))
+  commentsFeed.add(
+    new TextRenderable(commentsFeed.ctx, {
+      id: "x-comments-heading",
+      content: t`${bold(fg(COLORS.primary)("COMMENTS"))}  ${dim(fg(COLORS.secondary)("DIRECT REPLIES"))}`,
+      height: 1,
+      marginBottom: 1,
+      wrapMode: "none",
+    }),
+  )
+  commentsStateText = new TextRenderable(commentsFeed.ctx, {
+    id: "x-comments-state",
+    content: "",
+    marginTop: 1,
+    marginBottom: 1,
+    wrapMode: "word",
+  })
+  commentsFeed.add(commentsStateText)
+
+  root.remove(feed)
+  root.insertBefore(commentsFeed, footer)
+  currentView = "comments"
+  updateHeader()
+  updateFooter()
+  commentsFeed.focus()
+  setCommentsState("LOADING COMMENTS...", COLORS.amber)
+  setStatus("Loading direct replies...", COLORS.amber)
+  void loadCommentsPage()
+  return true
 }
 
 function destroyAuthOverlay(): void {
@@ -1708,9 +1954,11 @@ ${fg(COLORS.secondary)("The documented API is the default and recommended path."
     else pushModalRoute("cookie-risk")
   })
   modal.add(authSelect)
+  const leaveKey = modalReturnsToFeed ? formatCommandKey("x.modal.back") : formatCommandKey("app.quit")
+  const leaveAction = modalReturnsToFeed ? "back" : "quit"
   modal.add(
     new TextRenderable(renderer, {
-      content: t`${bold(fg(COLORS.accent)(`${formatKeyLabel("up")}/${formatKeyLabel("down")} or ${formatKeyLabel("j")}/${formatKeyLabel("k")}`))} ${fg(COLORS.secondary)("choose")}   ${bold(fg(COLORS.green)(formatKeyLabel("return")))} ${fg(COLORS.secondary)("continue")}   ${bold(fg(COLORS.secondary)(formatCommandKey("x.modal.back")))} ${fg(COLORS.secondary)("back")}`,
+      content: t`${bold(fg(COLORS.accent)(`${formatKeyLabel("up")}/${formatKeyLabel("down")} or ${formatKeyLabel("j")}/${formatKeyLabel("k")}`))} ${fg(COLORS.secondary)("choose")}   ${bold(fg(COLORS.green)(formatKeyLabel("return")))} ${fg(COLORS.secondary)("continue")}   ${bold(fg(COLORS.secondary)(leaveKey))} ${fg(COLORS.secondary)(leaveAction)}`,
       marginTop: 1,
       wrapMode: "word",
     }),
@@ -1726,7 +1974,7 @@ function submitSession(value: string): void {
   if (manualValue) {
     try {
       const cookies = parseManualSession(manualValue)
-      client = new TwitterClient({ cookies, timeoutMs: 20_000, quoteDepth: 1 })
+      client = twitterClientFactory({ cookies, timeoutMs: 20_000, quoteDepth: 1 })
       rememberBrowserSource(null)
       connectionMode = "cookie"
       currentStream = "home"
@@ -1921,6 +2169,12 @@ function registerXKeymap(renderer: CliRenderer): Keymap<Renderable, KeyEvent> {
           },
         },
         {
+          name: "x.feed.comments",
+          run() {
+            return openCommentsView()
+          },
+        },
+        {
           name: "x.feed.refresh",
           run() {
             void refreshTimeline()
@@ -1936,6 +2190,12 @@ function registerXKeymap(renderer: CliRenderer): Keymap<Renderable, KeyEvent> {
           name: "x.feed.switch-stream",
           run() {
             return switchTimelineStream()
+          },
+        },
+        {
+          name: "x.comments.back",
+          run() {
+            return closeCommentsView()
           },
         },
         {
@@ -1962,8 +2222,7 @@ function registerXKeymap(renderer: CliRenderer): Keymap<Renderable, KeyEvent> {
       bindings: commandBindings({ "x.modal.back": "escape" }),
     }),
     keymap.registerLayer({
-      priority: -10_000,
-      bindings: [{ key: "escape", cmd: "app.quit" }],
+      bindings: commandBindings(APP_BINDINGS),
     }),
   )
 
@@ -1972,7 +2231,17 @@ function registerXKeymap(renderer: CliRenderer): Keymap<Renderable, KeyEvent> {
       keymap.registerLayer({
         target: feed,
         targetMode: "focus",
-        bindings: commandBindings({ ...FEED_BINDINGS, ...APP_BINDINGS }),
+        bindings: commandBindings({ ...FEED_BINDINGS, ...VIEW_BINDINGS }),
+      }),
+    )
+  }
+
+  if (commentsFeed) {
+    keymapDisposers.push(
+      keymap.registerLayer({
+        target: commentsFeed,
+        targetMode: "focus",
+        bindings: commandBindings({ ...COMMENTS_BINDINGS, ...VIEW_BINDINGS }),
       }),
     )
   }
@@ -2044,7 +2313,7 @@ async function refreshTimeline(): Promise<void> {
         if (currentGeneration !== generation) return
 
         source = session.source
-        activeClient = new TwitterClient({ cookies: session.cookies, timeoutMs: REQUEST_TIMEOUT_MS, quoteDepth: 1 })
+        activeClient = twitterClientFactory({ cookies: session.cookies, timeoutMs: REQUEST_TIMEOUT_MS, quoteDepth: 1 })
         client = activeClient
         sessionSource = source
         setStatus(`Connected via ${source}. Loading the timeline...`, COLORS.amber)
@@ -2105,7 +2374,15 @@ async function refreshTimeline(): Promise<void> {
 }
 
 async function loadMoreTimeline(): Promise<void> {
-  if (loading || loadingMore || !timelineHasMore || !connectionMode || currentRenderer?.isDestroyed) return
+  if (
+    currentView !== "timeline" ||
+    loading ||
+    loadingMore ||
+    !timelineHasMore ||
+    !connectionMode ||
+    currentRenderer?.isDestroyed
+  )
+    return
   loadingMore = true
   showLoadingMoreIndicator()
   const currentGeneration = generation
@@ -2162,7 +2439,7 @@ async function loadMoreTimeline(): Promise<void> {
 }
 
 function loadMoreNearBottom(): void {
-  if (!feed || feed.isDestroyed || !timelineHasMore) return
+  if (currentView !== "timeline" || !feed || feed.isDestroyed || !timelineHasMore) return
   if (feed.viewport.height <= 0 || feed.scrollHeight <= 0) return
   const remaining = feed.scrollHeight - feed.scrollTop - feed.viewport.height
   if (remaining <= Math.max(3, feed.viewport.height * 2)) void loadMoreTimeline()
@@ -2172,6 +2449,99 @@ function scheduleLoadMoreCheck(): void {
   const currentGeneration = generation
   queueMicrotask(() => {
     if (currentGeneration === generation) loadMoreNearBottom()
+  })
+}
+
+async function loadCommentsPage(): Promise<void> {
+  if (
+    currentView !== "comments" ||
+    commentsLoading ||
+    !commentsHasMore ||
+    !commentsRootTweet ||
+    !connectionMode ||
+    currentRenderer?.isDestroyed
+  )
+    return
+  commentsLoading = true
+  const requestGeneration = commentsGeneration
+  const cursor = commentsCursor ?? undefined
+
+  try {
+    const result = await fetchCommentsPage(commentsRootTweet.id, cursor)
+    if (requestGeneration !== commentsGeneration || currentView !== "comments") return
+    appendComments(result.tweets)
+    commentsCursor = result.nextCursor === cursor ? null : result.nextCursor
+    commentsHasMore = commentsCursor !== null
+    if (commentCards.length === 0) {
+      setCommentsState(
+        connectionMode === "official"
+          ? "NO RECENT DIRECT REPLIES FOUND · X SEARCH COVERS THE LAST 7 DAYS"
+          : "NO DIRECT REPLIES FOUND",
+        COLORS.secondary,
+      )
+    } else {
+      setCommentsState(commentsHasMore ? "SCROLL FOR MORE" : "END OF COMMENTS", COLORS.muted)
+    }
+    setStatus(
+      `${commentCards.length} comment${commentCards.length === 1 ? "" : "s"} · ${commentsHasMore ? "scroll for more" : "end of comments"}`,
+      COLORS.green,
+    )
+  } catch (error) {
+    if (requestGeneration !== commentsGeneration || currentView !== "comments") return
+    const message = error instanceof Error ? error.message : String(error)
+    const cookieStop = connectionMode === "cookie" && shouldStopCookieSession(message)
+    if (cookieStop) {
+      cookieSessionBlocked = true
+      client = null
+    }
+    commentsHasMore = false
+    setCommentsState(
+      commentCards.length === 0 ? `COMMENTS UNAVAILABLE · ${message}` : `COULD NOT LOAD MORE · ${message}`,
+      COLORS.error,
+    )
+    setStatus("Could not load comments", COLORS.error)
+  } finally {
+    if (requestGeneration === commentsGeneration) {
+      commentsLoading = false
+      scheduleCommentsCheck()
+    }
+  }
+}
+
+function loadCommentsNearBottom(): void {
+  if (currentView !== "comments" || !commentsFeed || commentsFeed.isDestroyed || !commentsHasMore) return
+  if (commentsFeed.viewport.height <= 0 || commentsFeed.scrollHeight <= 0) return
+  const remaining = commentsFeed.scrollHeight - commentsFeed.scrollTop - commentsFeed.viewport.height
+  if (remaining <= Math.max(3, commentsFeed.viewport.height * 2)) void loadCommentsPage()
+}
+
+function scheduleCommentsCheck(): void {
+  const requestGeneration = commentsGeneration
+  queueMicrotask(() => {
+    if (requestGeneration === commentsGeneration) loadCommentsNearBottom()
+  })
+}
+
+function createMainScrollBox(renderer: CliRenderer, id: string): ScrollBoxRenderable {
+  return new ScrollBoxRenderable(renderer, {
+    id,
+    width: "100%",
+    flexGrow: 1,
+    scrollX: false,
+    scrollY: true,
+    viewportCulling: true,
+    rootOptions: { backgroundColor: COLORS.background },
+    viewportOptions: { backgroundColor: COLORS.background },
+    contentOptions: {
+      flexDirection: "column",
+      backgroundColor: COLORS.background,
+    },
+    verticalScrollbarOptions: {
+      trackOptions: {
+        foregroundColor: COLORS.accent,
+        backgroundColor: COLORS.border,
+      },
+    },
   })
 }
 
@@ -2193,8 +2563,18 @@ export function run(renderer: CliRenderer, options: XDemoRunOptions = {}): void 
   timelineHasMore = false
   officialNextToken = null
   cookieRequestedCount = PAGE_SIZE
+  currentView = "timeline"
+  timelineReturnState = null
+  commentsRootTweet = null
+  commentCards = []
+  commentTweetIds.clear()
+  commentsCursor = null
+  commentsHasMore = false
+  commentsLoading = false
+  commentsGeneration += 1
   detectedBrowserOverride = options.detectedBrowsers ? [...options.detectedBrowsers] : null
   xApiBaseUrl = options.xApiBaseUrl?.replace(/\/+$/, "") || X_API_BASE_URL
+  twitterClientFactory = options.twitterClientFactory ?? ((clientOptions) => new TwitterClient(clientOptions))
   renderer.setBackgroundColor(COLORS.background)
   renderer.setTerminalTitle("X · OpenTUI")
 
@@ -2236,53 +2616,31 @@ export function run(renderer: CliRenderer, options: XDemoRunOptions = {}): void 
   })
   statusBar.add(statusText)
 
-  feed = new ScrollBoxRenderable(renderer, {
-    id: "x-feed",
-    width: "100%",
-    flexGrow: 1,
-    scrollX: false,
-    scrollY: true,
-    viewportCulling: true,
-    rootOptions: { backgroundColor: COLORS.background },
-    viewportOptions: { backgroundColor: COLORS.background },
-    contentOptions: {
-      flexDirection: "column",
-      backgroundColor: COLORS.background,
-    },
-    verticalScrollbarOptions: {
-      trackOptions: {
-        foregroundColor: COLORS.accent,
-        backgroundColor: COLORS.border,
-      },
-    },
-  })
+  feed = createMainScrollBox(renderer, "x-feed")
+  commentsFeed = createMainScrollBox(renderer, "x-comments-feed")
   loadingMoreIndicator = createLoadingMoreIndicator()
   if (loadingMoreIndicator) feed.viewport.add(loadingMoreIndicator)
   feedScrollListener = loadMoreNearBottom
   feed.verticalScrollBar.on("change", feedScrollListener)
+  commentsScrollListener = loadCommentsNearBottom
+  commentsFeed.verticalScrollBar.on("change", commentsScrollListener)
   registerXKeymap(renderer)
   updateHeader()
-  const selectionKeys = `${formatCommandKey("x.feed.next")}/${formatCommandKey("x.feed.previous")}`
-  const openKey = formatCommandKey("x.feed.open")
-  const refreshKey = formatCommandKey("x.feed.refresh")
-  const sessionKey = formatCommandKey("x.session.open")
-  const quitKey = formatCommandKey("app.quit")
-  const consoleKey = formatCommandKey("app.console")
 
-  const footer = new BoxRenderable(renderer, {
+  footer = new BoxRenderable(renderer, {
     id: "x-footer",
     width: "100%",
     height: 1,
     flexShrink: 0,
     backgroundColor: COLORS.panel,
   })
-  footer.add(
-    new TextRenderable(renderer, {
-      content: t`${bold(fg(COLORS.accent)(selectionKeys))} ${fg(COLORS.secondary)("select")}   ${bold(fg(COLORS.accent)(`${formatKeyLabel("up")}/${formatKeyLabel("down")}`))} ${fg(COLORS.secondary)("scroll")}   ${bold(fg(COLORS.accent)(openKey))} ${fg(COLORS.secondary)("open")}   ${bold(fg(COLORS.green)(refreshKey))} ${fg(COLORS.secondary)("refresh")}   ${bold(fg(COLORS.amber)(sessionKey))} ${fg(COLORS.secondary)("session")}   ${bold(fg(COLORS.secondary)(consoleKey))} ${fg(COLORS.secondary)("logs")}   ${bold(fg(COLORS.error)(quitKey))} ${fg(COLORS.secondary)("quit")}`,
-      height: 1,
-      wrapMode: "none",
-    }),
-  )
+  footerText = new TextRenderable(renderer, {
+    content: "",
+    height: 1,
+    wrapMode: "none",
+  })
+  footer.add(footerText)
+  updateFooter()
 
   root.add(header)
   root.add(statusBar)
@@ -2303,6 +2661,7 @@ export function run(renderer: CliRenderer, options: XDemoRunOptions = {}): void 
 
 export function destroy(): void {
   generation += 1
+  commentsGeneration += 1
   loading = false
   loadingMore = false
   client = null
@@ -2320,6 +2679,12 @@ export function destroy(): void {
   timelineHasMore = false
   officialNextToken = null
   cookieRequestedCount = PAGE_SIZE
+  currentView = "timeline"
+  timelineReturnState = null
+  commentsRootTweet = null
+  commentsCursor = null
+  commentsHasMore = false
+  commentsLoading = false
 
   while (keymapDisposers.length > 0) keymapDisposers.pop()?.()
   modalRoutes = []
@@ -2328,26 +2693,36 @@ export function destroy(): void {
   destroyAuthOverlay()
   hideLoadingMoreIndicator()
   if (feedScrollListener && feed) feed.verticalScrollBar.off("change", feedScrollListener)
+  if (commentsScrollListener && commentsFeed) commentsFeed.verticalScrollBar.off("change", commentsScrollListener)
   feedScrollListener = null
+  commentsScrollListener = null
+  feed?.destroyRecursively()
+  commentsFeed?.destroyRecursively()
   root?.destroyRecursively()
   loadingMoreIndicator = null
   currentRenderer = null
   root = null
   feed = null
+  commentsFeed = null
   statusText = null
   headerText = null
+  footer = null
+  footerText = null
   emptyState = null
   cards = []
   timelineTweets = []
   timelineTweetIds.clear()
   postBodies.clear()
   expandedPostIds.clear()
+  commentCards = []
+  commentTweetIds.clear()
+  commentsStateText = null
   selectedIndex = -1
 }
 
 if (import.meta.main) {
   const renderer = await createCliRenderer({
-    exitOnCtrlC: true,
+    exitOnCtrlC: false,
     targetFps: 30,
   })
   try {

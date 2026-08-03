@@ -2,18 +2,29 @@ import { describe, expect, test } from "bun:test"
 import {
   BoxRenderable,
   CliRenderEvents,
+  ScrollBoxRenderable,
   TextAttributes,
   type CliRendererErrorEvent,
   type CliRendererHandlerErrorEvent,
   type Renderable,
 } from "@opentui/core"
 import { createTestRenderer, type TestRendererSetup } from "@opentui/core/testing"
+import { TwitterClient, type TweetData } from "@steipete/bird"
 import { mkdtempSync, rmSync } from "node:fs"
 import { join } from "node:path"
-import { destroy, run } from "./index.js"
+import { destroy, run, type XDemoRunOptions } from "./index.js"
 
 const TIMELINE_QUERY = {
   max_results: "20",
+  "tweet.fields": "attachments,author_id,created_at,entities,public_metrics,referenced_tweets",
+  expansions:
+    "attachments.media_keys,author_id,referenced_tweets.id,referenced_tweets.id.attachments.media_keys,referenced_tweets.id.author_id",
+  "user.fields": "id,name,profile_image_url,username",
+  "media.fields": "duration_ms,height,media_key,preview_image_url,type,url,width",
+} as const
+const COMMENTS_QUERY = {
+  sort_order: "recency",
+  max_results: "100",
   "tweet.fields": "attachments,author_id,created_at,entities,public_metrics,referenced_tweets",
   expansions:
     "attachments.media_keys,author_id,referenced_tweets.id,referenced_tweets.id.attachments.media_keys,referenced_tweets.id.author_id",
@@ -104,6 +115,25 @@ class XApiServer {
     })
   }
 
+  expectComments(
+    token: string,
+    tweetId: string,
+    reply: JsonReply | (() => JsonReply | Promise<JsonReply>),
+    nextToken?: string,
+  ): void {
+    this.expected.push({
+      label: nextToken ? "paginated comments" : "comments",
+      token,
+      pathname: "/2/tweets/search/recent",
+      query: {
+        query: `in_reply_to_tweet_id:${tweetId}`,
+        ...COMMENTS_QUERY,
+        ...(nextToken ? { next_token: nextToken } : {}),
+      },
+      reply: typeof reply === "function" ? reply : () => reply,
+    })
+  }
+
   async waitForRequestCount(count: number): Promise<void> {
     if (this.requests.length >= count) return
     await new Promise<void>((resolve) => this.requestWaiters.push({ count, resolve }))
@@ -177,7 +207,7 @@ interface AppHarness {
   close(): Promise<void>
 }
 
-async function createApp(height: number = 30): Promise<AppHarness> {
+async function createApp(height: number = 30, options: XDemoRunOptions = {}): Promise<AppHarness> {
   const configHome = mkdtempSync(join(process.cwd(), ".xtui-app-test-"))
   const originalAppData = process.env.APPDATA
   const originalXdgConfigHome = process.env.XDG_CONFIG_HOME
@@ -194,7 +224,7 @@ async function createApp(height: number = 30): Promise<AppHarness> {
   let setup: TestRendererSetup | null = null
   try {
     api = new XApiServer()
-    setup = await createTestRenderer({ width: 100, height, kittyKeyboard: true })
+    setup = await createTestRenderer({ width: 100, height, kittyKeyboard: true, exitOnCtrlC: false })
     const rendererErrors: unknown[] = []
     const unhandled: unknown[] = []
     const onRenderError = (event: CliRendererErrorEvent) => rendererErrors.push(event.error)
@@ -203,7 +233,11 @@ async function createApp(height: number = 30): Promise<AppHarness> {
     setup.renderer.on(CliRenderEvents.RENDER_ERROR, onRenderError)
     setup.renderer.on(CliRenderEvents.HANDLER_ERROR, onHandlerError)
     process.on("unhandledRejection", onUnhandledRejection)
-    run(setup.renderer, { detectedBrowsers: [], xApiBaseUrl: api.baseUrl })
+    run(setup.renderer, {
+      ...options,
+      detectedBrowsers: options.detectedBrowsers ?? [],
+      xApiBaseUrl: options.xApiBaseUrl ?? api.baseUrl,
+    })
     const activeApi = api
     const activeSetup = setup
 
@@ -261,6 +295,12 @@ function getCard(app: AppHarness, id: string): BoxRenderable {
   return card as BoxRenderable
 }
 
+function getScrollBox(app: AppHarness, id: string): ScrollBoxRenderable {
+  const scrollBox = app.setup.renderer.root.findDescendantById(id)
+  expect(scrollBox).toBeInstanceOf(ScrollBoxRenderable)
+  return scrollBox as ScrollBoxRenderable
+}
+
 function countPostCards(renderable: Renderable): number {
   let count = /^x-post-\d+$/.test(renderable.id) ? 1 : 0
   for (const child of renderable.getChildren()) {
@@ -279,6 +319,28 @@ function posts(start: number, count: number): Array<{ id: string; text: string }
 }
 
 describe("xtui application", () => {
+  test("uses Ctrl+C as the only exit key", async () => {
+    const app = await createApp(18)
+
+    try {
+      const frame = await app.setup.waitForFrame((value) => value.includes("CONNECT X"))
+      expect(frame).toContain("CTRL+C quit")
+      expect(frame).not.toContain("ESC back")
+
+      app.setup.mockInput.pressKey("q")
+      app.setup.mockInput.pressEscape()
+      expect(app.setup.renderer.isDestroyed).toBe(false)
+      expect(app.setup.renderer.currentFocusedRenderable?.id).toBe("x-connection-select")
+
+      app.setup.mockInput.pressCtrlC()
+      expect(app.setup.renderer.isDestroyed).toBe(true)
+      app.api.assertDone()
+      expectHealthy(app)
+    } finally {
+      await app.close()
+    }
+  })
+
   test("runs official authentication, rendering, focus, and feed commands end to end", async () => {
     const app = await createApp(36)
     app.api.expectUser("test-token", {
@@ -472,6 +534,317 @@ describe("xtui application", () => {
     }
   })
 
+  test("shows paginated comments and restores the exact timeline view", async () => {
+    const app = await createApp(12)
+    const finalPageRequested = deferred<void>()
+    const releaseFinalPage = deferred<void>()
+    app.api.expectUser("comments-token", {
+      body: { data: { id: "42", name: "Reader", username: "reader" } },
+    })
+    app.api.expectTimeline("comments-token", "42", { body: { data: posts(1, 20), meta: {} } })
+    app.api.expectComments("comments-token", "11", {
+      body: {
+        data: [{ id: "101", text: "First direct reply", author_id: "7" }],
+        includes: { users: [{ id: "7", name: "Alice", username: "alice" }] },
+        meta: { next_token: "comments-next" },
+      },
+    })
+    app.api.expectComments(
+      "comments-token",
+      "11",
+      {
+        body: {
+          data: [{ id: "101", text: "Duplicate reply", author_id: "7" }],
+          includes: { users: [{ id: "7", name: "Alice", username: "alice" }] },
+          meta: { next_token: "comments-final" },
+        },
+      },
+      "comments-next",
+    )
+    app.api.expectComments(
+      "comments-token",
+      "11",
+      async () => {
+        finalPageRequested.resolve()
+        await releaseFinalPage.promise
+        return {
+          body: {
+            data: [{ id: "102", text: "Second direct reply", author_id: "8" }],
+            includes: { users: [{ id: "8", name: "Bob", username: "bob" }] },
+            meta: {},
+          },
+        }
+      },
+      "comments-final",
+    )
+
+    try {
+      await app.setup.waitForFrame((frame) => frame.includes("CONNECT X"))
+      await loginOfficial(app, "comments-token")
+      await waitForApiFrame(app, 2, (frame) => frame.includes("Post 1"))
+      for (let index = 0; index < 10; index += 1) app.setup.mockInput.pressKey("j")
+      await app.setup.renderOnce()
+
+      const timelineFeed = getScrollBox(app, "x-feed")
+      const savedScrollTop = timelineFeed.scrollTop
+      expect(savedScrollTop).toBeGreaterThan(0)
+      expect(getCard(app, "11").backgroundColor.toInts()).toEqual([22, 24, 28, 255])
+
+      app.setup.mockInput.pressKey("c")
+      const commentsFrame = await waitForApiFrame(app, 3, (frame) => frame.includes("1 comment · scroll for more"))
+      expect(commentsFrame).toContain("COMMENTS  @reader  ESC BACK · READ-ONLY")
+      expect(commentsFrame).toContain("SELECTED POST")
+      expect(app.setup.renderer.currentFocusedRenderable?.id).toBe("x-comments-feed")
+      expect(app.setup.renderer.root.findDescendantById("x-comments-root-11")).toBeDefined()
+      expect(app.setup.renderer.root.findDescendantById("x-comment-101")).toBeDefined()
+
+      const commentsFeed = getScrollBox(app, "x-comments-feed")
+      const childIds = commentsFeed.getChildren().map((child) => child.id)
+      expect(childIds.indexOf("x-comments-root-11")).toBeLessThan(childIds.indexOf("x-comment-101"))
+      commentsFeed.scrollTo(100_000)
+      await finalPageRequested.promise
+      releaseFinalPage.resolve()
+      const completedFrame = await waitForApiFrame(app, 5, (frame) => frame.includes("2 comments · end of comments"))
+      expect(completedFrame).toContain("Second direct reply")
+      expect(app.setup.renderer.root.findDescendantById("x-comment-101")).toBeDefined()
+      expect(app.setup.renderer.root.findDescendantById("x-comment-102")).toBeDefined()
+
+      app.setup.mockInput.pressEscape()
+      const restoredFrame = await app.setup.waitForFrame(
+        (frame) => frame.includes("Post 11") && !frame.includes("SELECTED POST"),
+      )
+      expect(restoredFrame).toContain("FOLLOWING")
+      expect(restoredFrame).toContain("20 Following posts · X API v2 · read-only")
+      expect(app.setup.renderer.currentFocusedRenderable?.id).toBe("x-feed")
+      expect(getScrollBox(app, "x-feed")).toBe(timelineFeed)
+      expect(timelineFeed.scrollTop).toBe(savedScrollTop)
+      expect(getCard(app, "11").backgroundColor.toInts()).toEqual([22, 24, 28, 255])
+      expect(app.setup.renderer.root.findDescendantById("x-comment-101")).toBeUndefined()
+
+      app.setup.mockInput.pressKey("q")
+      app.setup.mockInput.pressEscape()
+      expect(app.setup.renderer.isDestroyed).toBe(false)
+      expect(app.setup.renderer.currentFocusedRenderable?.id).toBe("x-feed")
+      app.setup.mockInput.pressCtrlC()
+      expect(app.setup.renderer.isDestroyed).toBe(true)
+
+      app.api.assertDone()
+      expectHealthy(app)
+    } finally {
+      releaseFinalPage.resolve()
+      await app.close()
+    }
+  })
+
+  test("loads browser-session comments through Bird cursor pages", async () => {
+    const timelineTweet: TweetData = {
+      id: "601",
+      text: "Browser timeline post",
+      author: { name: "Browser User", username: "browser_user" },
+    }
+    const firstComment: TweetData = {
+      id: "602",
+      text: "Browser comment one",
+      author: { name: "Alice", username: "alice" },
+      inReplyToStatusId: "601",
+    }
+    const secondComment: TweetData = {
+      id: "603",
+      text: "Browser comment two",
+      author: { name: "Bob", username: "bob" },
+      inReplyToStatusId: "601",
+    }
+    const repliesCalls: Array<{ tweetId: string; options: Record<string, unknown> }> = []
+    let clientOptions: ConstructorParameters<typeof TwitterClient>[0] | null = null
+    const fakeClient = {
+      async getHomeTimeline() {
+        return { tweets: [timelineTweet] }
+      },
+      async getHomeLatestTimeline() {
+        return { tweets: [timelineTweet] }
+      },
+      async getRepliesPaged(tweetId: string, options: Record<string, unknown>) {
+        repliesCalls.push({ tweetId, options })
+        return options.cursor
+          ? { success: true, tweets: [secondComment] }
+          : { success: true, tweets: [firstComment], nextCursor: "browser-next" }
+      },
+    } as unknown as TwitterClient
+    const app = await createApp(12, {
+      twitterClientFactory(options) {
+        clientOptions = options
+        return fakeClient
+      },
+    })
+
+    try {
+      await app.setup.waitForFrame((frame) => frame.includes("CONNECT X"))
+      app.setup.mockInput.pressArrow("down")
+      app.setup.mockInput.pressEnter()
+      await app.setup.waitForFrame((frame) => frame.includes("ACCOUNT RISK"))
+      app.setup.mockInput.pressEnter()
+      await app.setup.waitForFrame((frame) => frame.includes("Use a session token or your browser login"))
+      await app.setup.mockInput.typeText("auth_token=test-auth; ct0=test-csrf")
+      app.setup.mockInput.pressEnter()
+      const timelineFrame = await app.setup.waitForFrame((frame) => frame.includes("Browser timeline post"))
+      expect(timelineFrame).toContain("unofficial cookie mode")
+      expect(clientOptions?.cookies.authToken).toBe("test-auth")
+      expect(clientOptions?.cookies.ct0).toBe("test-csrf")
+
+      app.setup.mockInput.pressKey("c")
+      for (let attempt = 0; attempt < 20 && repliesCalls.length < 2; attempt += 1) {
+        await new Promise<void>((resolve) => setImmediate(resolve))
+        getScrollBox(app, "x-comments-feed").scrollTo(100_000)
+        await app.setup.renderOnce()
+      }
+      const commentsFrame = await app.setup.waitForFrame((frame) => frame.includes("2 comments · end of comments"))
+      expect(commentsFrame).toContain("Browser comment two")
+      expect(repliesCalls).toEqual([
+        {
+          tweetId: "601",
+          options: { maxPages: 1, cursor: undefined, pageDelayMs: 0, includeRaw: true },
+        },
+        {
+          tweetId: "601",
+          options: { maxPages: 1, cursor: "browser-next", pageDelayMs: 0, includeRaw: true },
+        },
+      ])
+
+      app.setup.mockInput.pressEscape()
+      await app.setup.waitForFrame(
+        (frame) => frame.includes("Browser timeline post") && !frame.includes("SELECTED POST"),
+      )
+      expect(app.setup.renderer.currentFocusedRenderable?.id).toBe("x-feed")
+      expect(app.api.requests).toHaveLength(0)
+      app.api.assertDone()
+      expectHealthy(app)
+    } finally {
+      await app.close()
+    }
+  })
+
+  test("keeps the selected post at the top when no recent comments are found", async () => {
+    const app = await createApp(18)
+    app.api.expectUser("no-comments-token", {
+      body: { data: { id: "42", name: "Reader", username: "reader" } },
+    })
+    app.api.expectTimeline("no-comments-token", "42", {
+      body: { data: [{ id: "301", text: "Post without recent comments" }], meta: {} },
+    })
+    app.api.expectComments("no-comments-token", "301", { body: { data: [], meta: {} } })
+
+    try {
+      await app.setup.waitForFrame((frame) => frame.includes("CONNECT X"))
+      await loginOfficial(app, "no-comments-token")
+      await waitForApiFrame(app, 2, (frame) => frame.includes("Post without recent comments"))
+      app.setup.mockInput.pressKey("c")
+
+      const emptyFrame = await waitForApiFrame(app, 3, (frame) => frame.includes("NO RECENT DIRECT REPLIES FOUND"))
+      expect(emptyFrame).toContain("Post without recent comments")
+      expect(emptyFrame).toContain("X SEARCH COVERS THE LAST 7 DAYS")
+      expect(emptyFrame).toContain("0 comments · end of comments")
+
+      app.setup.mockInput.pressEscape()
+      await app.setup.waitForFrame(
+        (frame) => frame.includes("Post without recent comments") && !frame.includes("SELECTED POST"),
+      )
+      app.api.assertDone()
+      expectHealthy(app)
+    } finally {
+      await app.close()
+    }
+  })
+
+  test("keeps the selected post visible when comments fail", async () => {
+    const app = await createApp(18)
+    app.api.expectUser("comments-error-token", {
+      body: { data: { id: "42", name: "Reader", username: "reader" } },
+    })
+    app.api.expectTimeline("comments-error-token", "42", {
+      body: { data: [{ id: "401", text: "Post with unavailable replies" }], meta: {} },
+    })
+    app.api.expectComments("comments-error-token", "401", {
+      status: 403,
+      body: { errors: [{ detail: "Replies unavailable" }] },
+    })
+
+    try {
+      await app.setup.waitForFrame((frame) => frame.includes("CONNECT X"))
+      await loginOfficial(app, "comments-error-token")
+      await waitForApiFrame(app, 2, (frame) => frame.includes("Post with unavailable replies"))
+      app.setup.mockInput.pressKey("c")
+
+      const errorFrame = await waitForApiFrame(app, 3, (frame) => frame.includes("COMMENTS UNAVAILABLE"))
+      expect(errorFrame).toContain("Post with unavailable replies")
+      expect(errorFrame).toContain("X API HTTP 403: Replies unavailable")
+      expect(app.setup.renderer.currentFocusedRenderable?.id).toBe("x-comments-feed")
+
+      app.setup.mockInput.pressEscape()
+      await app.setup.waitForFrame(
+        (frame) => frame.includes("Post with unavailable replies") && !frame.includes("COMMENTS"),
+      )
+      expect(app.setup.renderer.currentFocusedRenderable?.id).toBe("x-feed")
+
+      app.api.assertDone()
+      expectHealthy(app)
+    } finally {
+      await app.close()
+    }
+  })
+
+  test("ignores a comments response after returning to the timeline", async () => {
+    const app = await createApp(18)
+    const commentsRequested = deferred<void>()
+    const releaseComments = deferred<void>()
+    app.api.expectUser("comments-back-token", {
+      body: { data: { id: "42", name: "Reader", username: "reader" } },
+    })
+    app.api.expectTimeline("comments-back-token", "42", {
+      body: { data: [{ id: "501", text: "Stay on timeline" }], meta: {} },
+    })
+    app.api.expectComments("comments-back-token", "501", async () => {
+      commentsRequested.resolve()
+      await releaseComments.promise
+      return { body: { data: [{ id: "502", text: "Late comment" }], meta: {} } }
+    })
+
+    try {
+      await app.setup.waitForFrame((frame) => frame.includes("CONNECT X"))
+      await loginOfficial(app, "comments-back-token")
+      await waitForApiFrame(app, 2, (frame) => frame.includes("Stay on timeline"))
+      const timelineFeed = getScrollBox(app, "x-feed")
+      const savedScrollTop = timelineFeed.scrollTop
+
+      app.setup.mockInput.pressKey("c")
+      await commentsRequested.promise
+      await app.setup.waitForFrame((frame) => frame.includes("LOADING COMMENTS"))
+      const commentsFeed = getScrollBox(app, "x-comments-feed")
+      app.setup.mockInput.pressEscape()
+      const restoredFrame = await app.setup.waitForFrame(
+        (frame) => frame.includes("Stay on timeline") && !frame.includes("SELECTED POST"),
+      )
+      expect(restoredFrame).toContain("1 Following posts · X API v2 · read-only")
+      expect(app.setup.renderer.currentFocusedRenderable?.id).toBe("x-feed")
+      expect(timelineFeed.scrollTop).toBe(savedScrollTop)
+
+      releaseComments.resolve()
+      await app.api.waitForResponseCount(3)
+      await Bun.sleep(10)
+      await app.setup.renderOnce()
+      expect(app.setup.renderer.root.findDescendantById("x-comment-502")).toBeUndefined()
+      expect(commentsFeed.findDescendantById("x-comment-502")).toBeUndefined()
+      const finalFrame = app.setup.captureCharFrame()
+      expect(finalFrame).toContain("1 Following posts · X API v2 · read-only")
+      expect(finalFrame).not.toContain("1 comment · end of comments")
+
+      app.api.assertDone()
+      expectHealthy(app)
+    } finally {
+      releaseComments.resolve()
+      await app.close()
+    }
+  })
+
   test("shows an API error and recovers through the session flow", async () => {
     const app = await createApp(24)
     app.api.expectUser("expired-token", {
@@ -545,7 +918,7 @@ describe("xtui application", () => {
       await loginOfficial(app, "lookup-token")
       await userRequested.promise
 
-      app.setup.mockInput.pressKey("q")
+      app.setup.mockInput.pressCtrlC()
       expect(app.setup.renderer.isDestroyed).toBe(true)
       releaseUser.resolve()
       await app.api.waitForResponseCount(1)
@@ -588,7 +961,7 @@ describe("xtui application", () => {
       for (let index = 0; index < 15; index += 1) app.setup.mockInput.pressKey("j")
       await pageRequested.promise
 
-      app.setup.mockInput.pressKey("q")
+      app.setup.mockInput.pressCtrlC()
       expect(app.setup.renderer.isDestroyed).toBe(true)
       releasePage.resolve()
       await app.api.waitForResponseCount(3)
