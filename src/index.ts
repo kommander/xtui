@@ -41,6 +41,9 @@ import {
 import { existsSync, readdirSync } from "node:fs"
 import { homedir } from "node:os"
 import { isAbsolute, join } from "node:path"
+import { loadRememberedBrowserSource, rememberBrowserSource, type BrowserSourceId } from "./browser-preference.js"
+
+export type { BrowserSourceId } from "./browser-preference.js"
 
 const COLORS = {
   background: "#000000",
@@ -92,8 +95,6 @@ interface CookieSource {
   detected(): boolean
   configure(options: GetCookiesOptions): void
 }
-
-export type BrowserSourceId = "chrome" | "brave" | "edge" | "firefox" | "safari"
 
 export interface XDemoRunOptions {
   detectedBrowsers?: BrowserSourceId[]
@@ -1334,6 +1335,7 @@ function openConnectionFlow(returnToFeed: boolean): void {
 }
 
 function selectCookieSource(source: CookieSource): void {
+  rememberBrowserSource(source.id)
   connectionMode = "cookie"
   currentStream = "home"
   selectedCookieSource = source
@@ -1450,6 +1452,7 @@ function submitOfficialToken(value: string): void {
     return
   }
 
+  rememberBrowserSource(null)
   officialToken = token
   officialUser = null
   connectionMode = "official"
@@ -1718,6 +1721,7 @@ function submitSession(value: string): void {
     try {
       const cookies = parseManualSession(manualValue)
       client = new TwitterClient({ cookies, timeoutMs: 20_000, quoteDepth: 1 })
+      rememberBrowserSource(null)
       connectionMode = "cookie"
       currentStream = "home"
       selectedCookieSource = null
@@ -2276,8 +2280,15 @@ export function run(renderer: CliRenderer, options: XDemoRunOptions = {}): void 
   root.add(footer)
   renderer.root.add(root)
   feed.focus()
-  setStatus("Waiting for a session...", COLORS.muted)
-  openConnectionFlow(false)
+  const rememberedSourceId = loadRememberedBrowserSource()
+  const rememberedSource = rememberedSourceId
+    ? detectCookieSources().find((source) => source.id === rememberedSourceId)
+    : undefined
+  if (rememberedSource) selectCookieSource(rememberedSource)
+  else {
+    setStatus("Waiting for a session...", COLORS.muted)
+    openConnectionFlow(false)
+  }
 }
 
 export function destroy(): void {

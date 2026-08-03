@@ -47,6 +47,8 @@ Browser mode reads `auth_token` and `ct0` from a selected local browser profile.
 
 Your OS may request Keychain, keyring, DPAPI, or browser-cookie-file access. Select the browser that owns the X session you intend to use.
 
+After you choose a browser, xtui remembers only that browser's ID and tries its cookie store automatically on later starts. Press `A` from the feed to open the full connection flow and replace it with another browser, manual cookies, or the official API.
+
 ## Controls
 
 | Key           | Action                                     |
@@ -95,6 +97,7 @@ Cross-compiled executables must be smoke-tested on their target OS and architect
 ## Development Checks
 
 ```bash
+bun run test
 bun run typecheck
 bun run fmt:check
 bun run lint
