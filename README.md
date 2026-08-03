@@ -100,6 +100,21 @@ bun run fmt:check
 bun run lint
 ```
 
+## OpenTUI Development Skill
+
+Use OpenTUI's official agent skill for development in this repository. It contains the current component, lifecycle,
+layout, keymap, native-image, and standalone-build guidance that coding agents should follow before changing the app.
+
+Install it locally for all supported agents from the repository root:
+
+```bash
+npx skills add anomalyco/opentui --skill opentui --agent '*' -y
+```
+
+The generated skill directories and `skills-lock.json` are intentionally gitignored. Each developer or agent workspace
+should install its own copy. When using an AI coding agent, ask it to load and follow the `opentui` skill before planning
+or implementing OpenTUI changes.
+
 ## License
 
 MIT
