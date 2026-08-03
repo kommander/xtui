@@ -535,7 +535,12 @@ describe("xtui application", () => {
   })
 
   test("shows paginated comments and restores the exact timeline view", async () => {
-    const app = await createApp(12)
+    const openedUrls: string[] = []
+    const app = await createApp(12, {
+      async openUrl(url) {
+        openedUrls.push(url)
+      },
+    })
     const finalPageRequested = deferred<void>()
     const releaseFinalPage = deferred<void>()
     app.api.expectUser("comments-token", {
@@ -606,8 +611,23 @@ describe("xtui application", () => {
       releaseFinalPage.resolve()
       const completedFrame = await waitForApiFrame(app, 5, (frame) => frame.includes("2 comments · end of comments"))
       expect(completedFrame).toContain("Second direct reply")
+      expect(completedFrame).toContain("J/K select   O open   ESC back")
       expect(app.setup.renderer.root.findDescendantById("x-comment-101")).toBeDefined()
       expect(app.setup.renderer.root.findDescendantById("x-comment-102")).toBeDefined()
+      const firstCommentCard = app.setup.renderer.root.findDescendantById("x-comment-101") as BoxRenderable
+      const secondCommentCard = app.setup.renderer.root.findDescendantById("x-comment-102") as BoxRenderable
+      expect(firstCommentCard.backgroundColor.toInts()).toEqual([22, 24, 28, 255])
+      expect(secondCommentCard.backgroundColor.toInts()).toEqual([8, 8, 8, 255])
+
+      app.setup.mockInput.pressKey("j")
+      await app.setup.renderOnce()
+      expect(firstCommentCard.backgroundColor.toInts()).toEqual([8, 8, 8, 255])
+      expect(secondCommentCard.backgroundColor.toInts()).toEqual([22, 24, 28, 255])
+      app.setup.mockInput.pressKey("o")
+      await new Promise<void>((resolve) => setImmediate(resolve))
+      expect(openedUrls).toEqual(["https://x.com/bob/status/102"])
+      app.setup.mockInput.pressKey("k")
+      expect(firstCommentCard.backgroundColor.toInts()).toEqual([22, 24, 28, 255])
 
       app.setup.mockInput.pressEscape()
       const restoredFrame = await app.setup.waitForFrame(

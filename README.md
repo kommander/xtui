@@ -54,12 +54,12 @@ After you choose a browser, xtui remembers only that browser's ID and tries its 
 
 | Key           | Action                                     |
 | ------------- | ------------------------------------------ |
-| `J` / `K`     | Select next/previous post                  |
+| `J` / `K`     | Select next/previous post or comment       |
 | `Up` / `Down` | Scroll                                     |
 | `Tab`         | Switch Home/Following when available       |
 | `E`           | Show more/less for the selected long post  |
 | `C`           | Show direct comments for the selected post |
-| `O`           | Open the selected post on x.com            |
+| `O`           | Open the selected post or comment on x.com |
 | `R`           | Refresh                                    |
 | `A`           | Change authentication/session              |
 | `Escape`      | Return from comments or nested setup views |

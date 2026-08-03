@@ -87,6 +87,9 @@ const FEED_BINDINGS = {
   "x.session.open": "a",
 } as const
 const COMMENTS_BINDINGS = {
+  "x.comments.next": "j",
+  "x.comments.previous": "k",
+  "x.comments.open": "o",
   "x.comments.back": "escape",
 } as const
 const APP_BINDINGS = {
@@ -109,6 +112,7 @@ export interface XDemoRunOptions {
   detectedBrowsers?: BrowserSourceId[]
   xApiBaseUrl?: string
   twitterClientFactory?: (options: ConstructorParameters<typeof TwitterClient>[0]) => TwitterClient
+  openUrl?: (url: string) => Promise<void>
 }
 
 function safeDirectories(root: string): string[] {
@@ -388,7 +392,9 @@ let currentView: AppView = "timeline"
 let timelineReturnState: TimelineReturnState | null = null
 let commentsRootTweet: TweetData | null = null
 let commentCards: BoxRenderable[] = []
+let commentTweets: TweetData[] = []
 let commentTweetIds = new Set<string>()
+let selectedCommentIndex = -1
 let commentsCursor: string | null = null
 let commentsHasMore = false
 let commentsLoading = false
@@ -396,6 +402,7 @@ let commentsGeneration = 0
 let commentsStateText: TextRenderable | null = null
 let commentsScrollListener: (() => void) | null = null
 let twitterClientFactory = (options: ConstructorParameters<typeof TwitterClient>[0]) => new TwitterClient(options)
+let openExternalUrl = launchUrl
 
 function sourceKey(cookie: Cookie, browser: BrowserName): string {
   return JSON.stringify([cookie.source?.browser ?? browser, cookie.source?.profile ?? "", cookie.source?.storeId ?? ""])
@@ -759,9 +766,9 @@ function updateHeader(): void {
 function updateFooter(): void {
   if (!footerText) return
   const quitKey = formatCommandKey("app.quit")
-  const consoleKey = formatCommandKey("app.console")
   if (currentView === "comments") {
-    footerText.content = t`${bold(fg(COLORS.accent)(`${formatKeyLabel("up")}/${formatKeyLabel("down")}`))} ${fg(COLORS.secondary)("scroll")}   ${bold(fg(COLORS.accent)(formatCommandKey("x.comments.back")))} ${fg(COLORS.secondary)("back")}   ${bold(fg(COLORS.secondary)(consoleKey))} ${fg(COLORS.secondary)("logs")}   ${bold(fg(COLORS.error)(quitKey))} ${fg(COLORS.secondary)("quit")}`
+    const selectionKeys = `${formatCommandKey("x.comments.next")}/${formatCommandKey("x.comments.previous")}`
+    footerText.content = t`${bold(fg(COLORS.accent)(selectionKeys))} ${fg(COLORS.secondary)("select")}   ${bold(fg(COLORS.accent)(formatCommandKey("x.comments.open")))} ${fg(COLORS.secondary)("open")}   ${bold(fg(COLORS.accent)(formatCommandKey("x.comments.back")))} ${fg(COLORS.secondary)("back")}   ${bold(fg(COLORS.error)(quitKey))} ${fg(COLORS.secondary)("quit")}`
     return
   }
 
@@ -800,10 +807,7 @@ function postUrl(tweet: TweetData): string | null {
   return `https://x.com/${tweet.author.username}/status/${tweet.id}`
 }
 
-async function openPost(tweet: TweetData): Promise<void> {
-  const url = postUrl(tweet)
-  if (!url) throw new Error("The selected post has an invalid X URL.")
-
+async function launchUrl(url: string): Promise<void> {
   const command =
     process.platform === "darwin"
       ? "open"
@@ -819,6 +823,12 @@ async function openPost(tweet: TweetData): Promise<void> {
       else reject(new Error(`${command} exited with status ${code ?? "unknown"}`))
     })
   })
+}
+
+async function openPost(tweet: TweetData): Promise<void> {
+  const url = postUrl(tweet)
+  if (!url) throw new Error("The selected post has an invalid X URL.")
+  await openExternalUrl(url)
 }
 
 function cleanPostText(value: string): string {
@@ -1417,7 +1427,9 @@ function setStatus(message: string, color: string): void {
 function clearCommentsContent(): void {
   for (const card of commentCards) card.destroyRecursively()
   commentCards = []
+  commentTweets = []
   commentTweetIds.clear()
+  selectedCommentIndex = -1
   commentsStateText?.destroyRecursively()
   commentsStateText = null
   if (!commentsFeed) return
@@ -1436,11 +1448,27 @@ function appendComments(tweets: readonly TweetData[]): number {
     if (tweet.id === commentsRootTweet?.id || commentTweetIds.has(tweet.id)) continue
     const card = createCommentsPostCard(commentsFeed, tweet, commentCards.length, "x-comment")
     commentTweetIds.add(tweet.id)
+    commentTweets.push(tweet)
     commentCards.push(card)
     commentsFeed.insertBefore(card, commentsStateText)
     added += 1
   }
+  if (selectedCommentIndex < 0 && commentCards.length > 0) selectComment(0, false)
   return added
+}
+
+function selectComment(nextIndex: number, scrollIntoView: boolean = true): void {
+  if (!commentsFeed || commentCards.length === 0) return
+  selectedCommentIndex = Math.max(0, Math.min(nextIndex, commentCards.length - 1))
+  for (const [index, card] of commentCards.entries()) {
+    const selected = index === selectedCommentIndex
+    card.backgroundColor = selected ? COLORS.cardActive : COLORS.card
+    card.borderColor = selected ? COLORS.borderActive : COLORS.border
+  }
+
+  const selectedCard = commentCards[selectedCommentIndex]
+  if (scrollIntoView && selectedCard) commentsFeed.scrollChildIntoView(selectedCard.id)
+  if (selectedCommentIndex >= commentTweets.length - 5) void loadCommentsPage()
 }
 
 function closeCommentsView(): boolean {
@@ -2199,6 +2227,31 @@ function registerXKeymap(renderer: CliRenderer): Keymap<Renderable, KeyEvent> {
           },
         },
         {
+          name: "x.comments.next",
+          run() {
+            selectComment(selectedCommentIndex + 1)
+          },
+        },
+        {
+          name: "x.comments.previous",
+          run() {
+            selectComment(selectedCommentIndex - 1)
+          },
+        },
+        {
+          name: "x.comments.open",
+          async run() {
+            const tweet = commentTweets[selectedCommentIndex]
+            if (!tweet) return false
+            try {
+              await openPost(tweet)
+              setStatus("Opened the selected comment on X", COLORS.green)
+            } catch (error) {
+              setStatus(`Could not open X: ${error instanceof Error ? error.message : String(error)}`, COLORS.error)
+            }
+          },
+        },
+        {
           name: "x.session.open",
           run() {
             if (loading) return false
@@ -2567,7 +2620,9 @@ export function run(renderer: CliRenderer, options: XDemoRunOptions = {}): void 
   timelineReturnState = null
   commentsRootTweet = null
   commentCards = []
+  commentTweets = []
   commentTweetIds.clear()
+  selectedCommentIndex = -1
   commentsCursor = null
   commentsHasMore = false
   commentsLoading = false
@@ -2575,6 +2630,7 @@ export function run(renderer: CliRenderer, options: XDemoRunOptions = {}): void 
   detectedBrowserOverride = options.detectedBrowsers ? [...options.detectedBrowsers] : null
   xApiBaseUrl = options.xApiBaseUrl?.replace(/\/+$/, "") || X_API_BASE_URL
   twitterClientFactory = options.twitterClientFactory ?? ((clientOptions) => new TwitterClient(clientOptions))
+  openExternalUrl = options.openUrl ?? launchUrl
   renderer.setBackgroundColor(COLORS.background)
   renderer.setTerminalTitle("X · OpenTUI")
 
@@ -2715,7 +2771,9 @@ export function destroy(): void {
   postBodies.clear()
   expandedPostIds.clear()
   commentCards = []
+  commentTweets = []
   commentTweetIds.clear()
+  selectedCommentIndex = -1
   commentsStateText = null
   selectedIndex = -1
 }
