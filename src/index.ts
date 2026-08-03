@@ -3,6 +3,7 @@
 import { spawn } from "node:child_process"
 import {
   BoxRenderable,
+  CliRenderEvents,
   type CliRenderer,
   ImageError,
   ImageLoadError,
@@ -2172,6 +2173,9 @@ function scheduleLoadMoreCheck(): void {
 export function run(renderer: CliRenderer, options: XDemoRunOptions = {}): void {
   generation += 1
   currentRenderer = renderer
+  renderer.once(CliRenderEvents.DESTROY, () => {
+    if (currentRenderer === renderer) destroy()
+  })
   connectionMode = null
   officialToken = null
   officialUser = null
@@ -2335,13 +2339,15 @@ export function destroy(): void {
   selectedIndex = -1
 }
 
-const renderer = await createCliRenderer({
-  exitOnCtrlC: true,
-  targetFps: 30,
-})
-try {
-  run(renderer)
-} catch (error) {
-  renderer.destroy()
-  throw error
+if (import.meta.main) {
+  const renderer = await createCliRenderer({
+    exitOnCtrlC: true,
+    targetFps: 30,
+  })
+  try {
+    run(renderer)
+  } catch (error) {
+    renderer.destroy()
+    throw error
+  }
 }
