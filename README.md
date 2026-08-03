@@ -103,6 +103,8 @@ bun run fmt:check
 bun run lint
 ```
 
+The application tests use OpenTUI's native in-memory renderer and keyboard driver. Official X API requests go to a local HTTP server; the suite does not access X or local browser sessions.
+
 ## OpenTUI Development Skill
 
 Use OpenTUI's official agent skill for development in this repository. It contains the current component, lifecycle,

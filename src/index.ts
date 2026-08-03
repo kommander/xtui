@@ -74,6 +74,7 @@ const REQUEST_TIMEOUT_MS = 20_000
 const MEDIA_MIN_ROWS = 5
 const MEDIA_MAX_ROWS = 18
 const POST_PREVIEW_GRAPHEMES = 280
+const X_API_BASE_URL = "https://api.x.com"
 const FEED_BINDINGS = {
   "x.feed.next": "j",
   "x.feed.previous": "k",
@@ -99,6 +100,7 @@ interface CookieSource {
 
 export interface XDemoRunOptions {
   detectedBrowsers?: BrowserSourceId[]
+  xApiBaseUrl?: string
 }
 
 function safeDirectories(root: string): string[] {
@@ -359,6 +361,7 @@ let modalReturnsToFeed = false
 let browserRouteSources: CookieSource[] = []
 let keymapDisposers: Array<() => void> = []
 let activeKeymap: Keymap<Renderable, KeyEvent> | null = null
+let xApiBaseUrl = X_API_BASE_URL
 
 function sourceKey(cookie: Cookie, browser: BrowserName): string {
   return JSON.stringify([cookie.source?.browser ?? browser, cookie.source?.profile ?? "", cookie.source?.storeId ?? ""])
@@ -479,7 +482,7 @@ async function fetchXApi<T>(path: string, token: string): Promise<{ data: XApiRe
   const timeout = setTimeout(() => controller.abort(), REQUEST_TIMEOUT_MS)
 
   try {
-    const response = await fetch(`https://api.x.com${path}`, {
+    const response = await fetch(`${xApiBaseUrl}${path}`, {
       method: "GET",
       headers: {
         accept: "application/json",
@@ -542,18 +545,20 @@ function officialWrapperUrls(post: XApiPost): string[] {
     .map((entity) => entity.url)
 }
 
-async function fetchOfficialTimeline(paginationToken?: string): Promise<{
+async function fetchOfficialTimeline(
+  paginationToken?: string,
+  requestGeneration: number = generation,
+): Promise<{
   tweets: TweetData[]
   nextToken: string | null
   rateLimitRemaining: string | null
 }> {
-  if (!officialToken) throw new Error("An OAuth 2.0 user access token is required.")
+  const token = officialToken
+  if (!token) throw new Error("An OAuth 2.0 user access token is required.")
 
   if (!officialUser) {
-    const { data } = await fetchXApi<XApiUser>(
-      "/2/users/me?user.fields=id,name,profile_image_url,username",
-      officialToken,
-    )
+    const { data } = await fetchXApi<XApiUser>("/2/users/me?user.fields=id,name,profile_image_url,username", token)
+    if (requestGeneration !== generation) throw new Error("Timeline request was cancelled.")
     officialUser = requireApiData(data, "the authenticated user")
   }
 
@@ -568,7 +573,7 @@ async function fetchOfficialTimeline(paginationToken?: string): Promise<{
   if (paginationToken) params.set("pagination_token", paginationToken)
   const { data, response } = await fetchXApi<XApiPost[]>(
     `/2/users/${encodeURIComponent(officialUser.id)}/timelines/reverse_chronological?${params.toString()}`,
-    officialToken,
+    token,
   )
   const posts = data.data ?? []
   const users = new Map((data.includes?.users ?? []).map((user) => [user.id, user]))
@@ -2189,6 +2194,7 @@ export function run(renderer: CliRenderer, options: XDemoRunOptions = {}): void 
   officialNextToken = null
   cookieRequestedCount = PAGE_SIZE
   detectedBrowserOverride = options.detectedBrowsers ? [...options.detectedBrowsers] : null
+  xApiBaseUrl = options.xApiBaseUrl?.replace(/\/+$/, "") || X_API_BASE_URL
   renderer.setBackgroundColor(COLORS.background)
   renderer.setTerminalTitle("X · OpenTUI")
 
