@@ -1689,7 +1689,7 @@ describe("xtui application", () => {
       await homeFinished.promise
       await app.setup.waitForFrame((frame) => frame.includes("Post 1"))
       const homeFeed = getScrollBox(app, "x-feed")
-      expect(homeFeed.viewport.height).toBe(loadingViewportHeight)
+      expect(homeFeed.viewport.height).toBe(loadingViewportHeight + 1)
       app.setup.mockInput.pressKey("e")
       await app.setup.waitForFrame((frame) => frame.includes("[E] Show Less"))
       for (let index = 0; index < 5; index += 1) app.setup.mockInput.pressKey("j")
@@ -1725,6 +1725,53 @@ describe("xtui application", () => {
     } finally {
       releaseHome.resolve()
       releaseFollowing.resolve()
+      await app.close()
+    }
+  })
+
+  test("uses the activity row only while loading", async () => {
+    const timelineRequested = deferred<void>()
+    const releaseTimeline = deferred<void>()
+    const app = await createApp(12)
+    app.api.expectUser("activity-token", {
+      body: { data: { id: "42", name: "Reader", username: "reader" } },
+    })
+    app.api.expectTimeline("activity-token", "42", async () => {
+      timelineRequested.resolve()
+      await releaseTimeline.promise
+      return { body: { data: [{ id: "201", text: "Activity row settled" }], meta: {} } }
+    })
+
+    try {
+      await loginOfficial(app, "activity-token")
+      await timelineRequested.promise
+      await app.setup.waitForFrame((frame) => frame.includes("Loading Following"))
+      const activityRow = app.setup.renderer.root.findDescendantById("x-activity-row")!
+      const activitySpinner = app.setup.renderer.root.findDescendantById("x-activity-spinner")!
+      const viewStack = app.setup.renderer.root.findDescendantById("x-view-stack")!
+      const footer = app.setup.renderer.root.findDescendantById("x-footer")!
+      const loadingViewHeight = viewStack.height
+
+      expect(activityRow.visible).toBe(true)
+      expect(activityRow.height).toBe(1)
+      expect(activitySpinner.visible).toBe(true)
+      expect(viewStack.screenY + viewStack.height).toBe(activityRow.screenY)
+      expect(activityRow.screenY + activityRow.height).toBe(footer.screenY)
+
+      releaseTimeline.resolve()
+      await waitForApiFrame(app, 2, (frame) => frame.includes("Activity row settled"))
+      await app.setup.flush({ maxPasses: 100 })
+
+      expect(activitySpinner.visible).toBe(false)
+      expect(activityRow.visible).toBe(false)
+      expect(viewStack.height).toBe(loadingViewHeight + 1)
+      expect(viewStack.screenY + viewStack.height).toBe(footer.screenY)
+      expect(footer.height).toBe(1)
+      expect(footer.screenY + footer.height).toBe(app.setup.renderer.height)
+      app.api.assertDone()
+      expectHealthy(app)
+    } finally {
+      releaseTimeline.resolve()
       await app.close()
     }
   })

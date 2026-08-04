@@ -1110,6 +1110,7 @@ function updateActivityRow(): void {
     ([leftId, left], [rightId, right]) => right.priority - left.priority || rightId - leftId,
   )
   const current = active[0]?.[1]
+  activityRow.visible = current !== undefined
   activitySpinner.visible = current !== undefined
   activityLabel.content = current ? `${current.label}${active.length > 1 ? ` · ${active.length} operations` : ""}` : ""
 }
@@ -3922,6 +3923,7 @@ export function run(renderer: CliRenderer, options: XDemoRunOptions = {}): void 
   })
   activityRow.add(activitySpinner)
   activityRow.add(activityLabel)
+  updateActivityRow()
   updateFooter()
   resizeListener = () => {
     updateFooter()
