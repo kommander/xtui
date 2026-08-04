@@ -845,7 +845,6 @@ function updateFooter(): void {
     if (currentView === "comments") {
       addCompactFooterItem("x-footer-back", "back", closeCommentsView)
       addCompactFooterItem("x-footer-logs", "logs", toggleConsole, COLORS.secondary)
-      addCompactFooterItem("x-footer-quit", "quit", quitApplication, COLORS.error)
     } else {
       addCompactFooterItem("x-footer-comments", "comments", openCommentsView)
       addCompactFooterItem(
@@ -858,18 +857,15 @@ function updateFooter(): void {
       )
       addCompactFooterItem("x-footer-session", "session", openSessionFlowFromFeed, COLORS.amber)
       addCompactFooterItem("x-footer-logs", "logs", toggleConsole, COLORS.secondary)
-      addCompactFooterItem("x-footer-quit", "quit", quitApplication, COLORS.error)
     }
     return
   }
-  const quitKey = formatCommandKey("app.quit")
   if (currentView === "comments") {
     const selectionKeys = `${formatCommandKey("x.comments.next")}/${formatCommandKey("x.comments.previous")}`
     addFooterItem("x-footer-comment-select", selectionKeys, "select")
     addFooterItem("x-footer-comment-open", formatCommandKey("x.comments.open"), "open")
     addFooterItem("x-footer-back", formatCommandKey("x.comments.back"), "back", COLORS.accent, closeCommentsView)
     addFooterItem("x-footer-logs", formatCommandKey("app.console"), "logs", COLORS.secondary, toggleConsole)
-    addFooterItem("x-footer-quit", quitKey, "quit", COLORS.error, quitApplication)
     return
   }
 
@@ -888,7 +884,6 @@ function updateFooter(): void {
     openSessionFlowFromFeed,
   )
   addFooterItem("x-footer-logs", formatCommandKey("app.console"), "logs", COLORS.secondary, toggleConsole)
-  addFooterItem("x-footer-quit", quitKey, "quit", COLORS.error, quitApplication)
 }
 
 function resetPaginationState(): void {

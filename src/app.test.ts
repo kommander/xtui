@@ -439,10 +439,9 @@ describe("xtui application", () => {
       await app.setup.mockInput.typeText("narrow-token")
       await clickRenderable(app, "x-official-token-hint-submit")
       const timelineFrame = await waitForApiFrame(app, 2, (frame) => frame.includes("Narrow timeline"))
-      expect(timelineFrame).toContain("comments refresh session logs quit")
-      const quit = app.setup.renderer.root.findDescendantById("x-footer-quit")
-      expect(quit).toBeDefined()
-      expect(quit!.screenX + quit!.width).toBeLessThanOrEqual(40)
+      expect(timelineFrame).toContain("comments refresh session logs")
+      expect(timelineFrame).not.toContain("CTRL+C quit")
+      expect(app.setup.renderer.root.findDescendantById("x-footer-quit")).toBeUndefined()
 
       app.api.assertDone()
       expectHealthy(app)
@@ -658,8 +657,6 @@ describe("xtui application", () => {
 
       app.api.assertDone()
       expectHealthy(app)
-      await clickRenderable(app, "x-footer-quit")
-      expect(app.setup.renderer.isDestroyed).toBe(true)
     } finally {
       await app.close()
     }
