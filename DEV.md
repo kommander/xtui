@@ -1,24 +1,48 @@
-# Releasing xtooey
+# Developing and releasing xtooey
 
-xtooey publishes one stable, public npm package directly from `.github/workflows/release.yml`. Snapshot and prerelease publishing are intentionally unsupported.
+## Local Development
 
-## One-Time Bootstrap
+Requirements:
 
-npm Trusted Publishing can only be configured after the package exists. The first `0.1.0` publish must therefore be performed interactively by a package maintainer with npm account-level two-factor authentication.
+- Bun 1.3 or newer
+- A terminal with Kitty or Sixel support for native images; other terminals use block rendering
 
-1. Confirm `xtooey` is still available with `npm view xtooey` (an expected `E404` means it is not published).
-2. From the final, clean release commit on `main`, run `bun install --frozen-lockfile` and `bun run release:check`.
-3. Create and push the schema/version tag without creating a GitHub Release: `git tag -a v0.1.0 -m "v0.1.0"` followed by `git push origin v0.1.0`.
-4. Authenticate with `npm login` and publish with `npm publish --access public`. Complete the interactive 2FA challenge.
-5. Configure the package's Trusted Publisher on npmjs.com:
+Install dependencies and start the application:
+
+```bash
+bun install --frozen-lockfile
+bun run start
+```
+
+Use `bun run dev` for automatic restart. Before committing, run:
+
+```bash
+bun test
+bun run typecheck
+bun run fmt:check
+bun run lint
+```
+
+`bun run build` creates a standalone executable for the current platform. `bun run package:smoke` creates the real npm tarball, installs it into a clean temporary project with npm, verifies the `xtooey` bin shim, and imports the installed CLI.
+
+## npm Release Model
+
+xtooey publishes one stable, public npm package directly from `.github/workflows/release.yml`. Snapshot and prerelease publishing are intentionally unsupported. Run `bun run release:check` before every release; it includes all quality checks, tests, an npm pack preview, and the clean-install package smoke test.
+
+## One-Time npm And GitHub Setup
+
+npm Trusted Publishing can only be configured after the package exists. The first `0.1.0` publish was therefore performed interactively by a package maintainer with npm account-level two-factor authentication. These are the bootstrap steps if the package setup ever needs to be reproduced:
+
+1. Publish the initial package interactively with npm account-level 2FA and push a plain version tag so the versioned schema URL exists. `0.1.0` and `v0.1.0` are already complete.
+2. Configure the package's Trusted Publisher on npmjs.com:
    - Provider: **GitHub Actions**
    - Organization or user: `kommander`
    - Repository: `xtui`
    - Workflow filename: `release.yml`
    - Environment: `npm`
    - Allowed action: **npm publish**
-6. In the npm package settings, select **Require two-factor authentication and disallow tokens** for publishing access.
-7. Do not add `NPM_TOKEN` or `NODE_AUTH_TOKEN` to the repository. Remove any old npm publish secrets after Trusted Publishing is configured.
+3. In the npm package settings, select **Require two-factor authentication and disallow tokens** for publishing access.
+4. Do not add `NPM_TOKEN` or `NODE_AUTH_TOKEN` to the repository. Remove any old npm publish secrets after Trusted Publishing is configured.
 
 The bootstrap publish is the `0.1.0` production release. Because it is published interactively rather than through OIDC, `0.1.0` will not have npm's automatic GitHub provenance attestation. Do not publish a GitHub Release for `v0.1.0`: the release workflow correctly rejects versions that already exist on npm. Stable GitHub Releases drive subsequent versions and receive automatic provenance.
 
@@ -28,7 +52,7 @@ Create an environment named `npm` before running the workflow. Referencing a mis
 
 Recommended environment and repository protection:
 
-- Require a reviewer for the `npm` environment and prevent self-review.
+- Require a reviewer for the `npm` environment. Prevent self-review only when another maintainer can approve releases.
 - Disable administrator bypass where repository policy permits.
 - Restrict environment deployment to protected release tags such as `v*`.
 - Add a tag ruleset protecting `v*` tags.
@@ -44,6 +68,15 @@ The publish job has only `contents: read` and `id-token: write`. npm exchanges t
 3. Commit and push the version change; wait for CI to pass on `main`.
 4. Publish a non-prerelease GitHub Release whose tag is exactly `v<package.json version>`, for example `v0.1.1`.
 5. Wait for the **Release npm** workflow and verify the version and provenance badge on npmjs.com.
+
+With GitHub CLI, step 4 is:
+
+```bash
+version="$(node -p "require('./package.json').version")"
+gh release create "v${version}" --target main --title "v${version}" --generate-notes
+```
+
+Approve the `npm` environment deployment when prompted. Do not run `npm publish` manually after the bootstrap release.
 
 The workflow checks out the release tag, rejects prerelease versions, requires exact tag/manifest version equality, rejects versions already present on npm, validates the package, previews the npm tarball, and runs `npm publish` with the `latest` dist-tag.
 

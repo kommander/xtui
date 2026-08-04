@@ -175,7 +175,7 @@ Cross-compiled executables must be smoke-tested on their target OS and architect
 
 ## Releasing
 
-Production npm releases use npm Trusted Publishing from GitHub Actions. See [RELEASING.md](RELEASING.md) for the one-time npm/GitHub setup and release procedure.
+Production npm releases use npm Trusted Publishing from GitHub Actions. See [DEV.md](DEV.md) for development commands, npm/GitHub setup, and the release procedure.
 
 ## Development Checks
 

@@ -29,7 +29,7 @@
     "src/browser-preference.ts",
     "src/config.ts",
     "xtooey.schema.json",
-    "RELEASING.md"
+    "DEV.md"
   ],
   "publishConfig": {
     "access": "public",
