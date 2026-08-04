@@ -1087,13 +1087,26 @@ describe("xtui application", () => {
     }
   })
 
-  test("opens the selected comment image and returns to comments", async () => {
+  test("opens images for the selected root post or comment", async () => {
     const app = await createApp(30)
     app.api.expectUser("comment-image-token", {
       body: { data: { id: "42", name: "Reader", username: "reader" } },
     })
     app.api.expectTimeline("comment-image-token", "42", {
-      body: { data: [{ id: "7251", text: "Root post" }], meta: {} },
+      body: {
+        data: [
+          {
+            id: "7251",
+            text: "Root post with image",
+            attachments: { media_keys: ["root-photo"] },
+            public_metrics: { reply_count: 1, quote_count: 3, retweet_count: 5, like_count: 7 },
+          },
+        ],
+        includes: {
+          media: [{ media_key: "root-photo", type: "photo", url: RED_PNG_DATA_URL, width: 1, height: 1 }],
+        },
+        meta: {},
+      },
     })
     app.api.expectComments("comment-image-token", "7251", {
       body: {
@@ -1115,19 +1128,43 @@ describe("xtui application", () => {
     try {
       await app.setup.waitForFrame((frame) => frame.includes("CONNECT X"))
       await loginOfficial(app, "comment-image-token")
-      await waitForApiFrame(app, 2, (frame) => frame.includes("Root post"))
+      await waitForApiFrame(app, 2, (frame) => frame.includes("Root post with image"))
       app.setup.mockInput.pressKey("c")
-      await waitForApiFrame(app, 3, (frame) => frame.includes("Reply with image"))
+      await waitForApiFrame(app, 3, (frame) => frame.includes("1 comment · end of comments"))
+
+      const rootCard = app.setup.renderer.root.findDescendantById("x-comments-root-7251") as BoxRenderable
+      const commentCard = app.setup.renderer.root.findDescendantById("x-comment-7252") as BoxRenderable
+      expect(rootCard.title).toBe("SELECTED POST")
+      expect(rootCard.backgroundColor.toInts()).toEqual([22, 24, 28, 255])
+      expect(commentCard.backgroundColor.toInts()).toEqual([8, 8, 8, 255])
 
       app.setup.mockInput.pressKey("i")
-      const imageFrame = await app.setup.waitForFrame((frame) => frame.includes("IMAGE · 100%"))
-      expect(imageFrame).toContain("2 replies   4 quotes   8 likes")
+      const rootImageFrame = await app.setup.waitForFrame((frame) => frame.includes("IMAGE · 100%"))
+      expect(rootImageFrame).toContain("1 replies   3 quotes   7 likes")
+      expect(getImage(app, "x-image-view-image").source).toBe(RED_PNG_DATA_URL)
+
+      app.setup.mockInput.pressEscape()
+      await app.setup.waitForFrame((frame) => frame.includes("COMMENTS  DIRECT REPLIES"))
+      app.setup.mockInput.pressKey("j")
+      await app.setup.waitForFrame((frame) => frame.includes("Reply with image"))
+      expect(rootCard.title).toBe("POST")
+      expect(rootCard.backgroundColor.toInts()).toEqual([8, 8, 8, 255])
+      expect(commentCard.backgroundColor.toInts()).toEqual([22, 24, 28, 255])
+
+      app.setup.mockInput.pressKey("i")
+      const commentImageFrame = await app.setup.waitForFrame((frame) => frame.includes("IMAGE · 100%"))
+      expect(commentImageFrame).toContain("2 replies   4 quotes   8 likes")
       expect(getImage(app, "x-image-view-image").source).toBe(BLUE_PNG_DATA_URL)
 
       app.setup.mockInput.pressEscape()
       const commentsFrame = await app.setup.waitForFrame((frame) => frame.includes("Reply with image"))
       expect(commentsFrame).toContain("COMMENTS  DIRECT REPLIES")
       expect(app.setup.renderer.currentFocusedRenderable?.id).toBe("x-comments-feed")
+
+      app.setup.mockInput.pressKey("k")
+      expect(rootCard.title).toBe("SELECTED POST")
+      expect(rootCard.backgroundColor.toInts()).toEqual([22, 24, 28, 255])
+      expect(commentCard.backgroundColor.toInts()).toEqual([8, 8, 8, 255])
 
       app.api.assertDone()
       expectHealthy(app)
@@ -1485,15 +1522,35 @@ describe("xtui application", () => {
       expect(app.setup.renderer.root.findDescendantById("x-comment-102")).toBeDefined()
       const firstCommentCard = app.setup.renderer.root.findDescendantById("x-comment-101") as BoxRenderable
       const secondCommentCard = app.setup.renderer.root.findDescendantById("x-comment-102") as BoxRenderable
-      expect(firstCommentCard.backgroundColor.toInts()).toEqual([22, 24, 28, 255])
+      const rootCommentCard = app.setup.renderer.root.findDescendantById("x-comments-root-11") as BoxRenderable
+      expect(rootCommentCard.backgroundColor.toInts()).toEqual([22, 24, 28, 255])
+      expect(firstCommentCard.backgroundColor.toInts()).toEqual([8, 8, 8, 255])
       expect(secondCommentCard.backgroundColor.toInts()).toEqual([8, 8, 8, 255])
 
-      await clickRenderable(app, "x-comment-102")
+      app.setup.mockInput.pressKey("o")
+      await new Promise<void>((resolve) => setImmediate(resolve))
+      expect(openedUrls).toEqual(["https://x.com/reader/status/11"])
+
+      app.setup.mockInput.pressKey("j")
+      expect(rootCommentCard.backgroundColor.toInts()).toEqual([8, 8, 8, 255])
+      expect(firstCommentCard.backgroundColor.toInts()).toEqual([22, 24, 28, 255])
+      app.setup.mockInput.pressKey("j")
       expect(firstCommentCard.backgroundColor.toInts()).toEqual([8, 8, 8, 255])
+      expect(secondCommentCard.backgroundColor.toInts()).toEqual([22, 24, 28, 255])
+      app.setup.mockInput.pressKey("k")
+      expect(firstCommentCard.backgroundColor.toInts()).toEqual([22, 24, 28, 255])
+      expect(secondCommentCard.backgroundColor.toInts()).toEqual([8, 8, 8, 255])
+      app.setup.mockInput.pressKey("k")
+      expect(rootCommentCard.backgroundColor.toInts()).toEqual([22, 24, 28, 255])
+      expect(firstCommentCard.backgroundColor.toInts()).toEqual([8, 8, 8, 255])
+
+      commentsFeed.scrollTo(100_000)
+      await app.setup.renderOnce()
+      await clickRenderable(app, "x-comment-102", "x-comments-feed")
       expect(secondCommentCard.backgroundColor.toInts()).toEqual([22, 24, 28, 255])
       app.setup.mockInput.pressKey("o")
       await new Promise<void>((resolve) => setImmediate(resolve))
-      expect(openedUrls).toEqual(["https://x.com/bob/status/102"])
+      expect(openedUrls).toEqual(["https://x.com/reader/status/11", "https://x.com/bob/status/102"])
       app.setup.mockInput.pressKey("k")
       expect(firstCommentCard.backgroundColor.toInts()).toEqual([22, 24, 28, 255])
 

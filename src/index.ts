@@ -369,6 +369,12 @@ interface CommentsPage {
   nextCursor: string | null
 }
 
+interface CommentsItem {
+  kind: "root" | "comment"
+  tweet: TweetData
+  card: BoxRenderable
+}
+
 interface TimelineReturnState {
   stream: TimelineStream
 }
@@ -525,10 +531,9 @@ let xApiBaseUrl = X_API_BASE_URL
 let currentView: AppView = "timeline"
 let timelineReturnState: TimelineReturnState | null = null
 let commentsRootTweet: TweetData | null = null
-let commentCards: BoxRenderable[] = []
-let commentTweets: TweetData[] = []
+let commentsItems: CommentsItem[] = []
 let commentTweetIds = new Set<string>()
-let selectedCommentIndex = -1
+let selectedCommentsIndex = -1
 let commentsCursor: string | null = null
 let commentsHasMore = false
 let commentsLoading = false
@@ -1219,12 +1224,16 @@ async function openTimelinePost(): Promise<boolean> {
   return true
 }
 
-async function openSelectedComment(): Promise<boolean> {
-  const tweet = commentTweets[selectedCommentIndex]
+function selectedCommentsTweet(): TweetData | null {
+  return commentsItems[selectedCommentsIndex]?.tweet ?? null
+}
+
+async function openSelectedCommentsTweet(): Promise<boolean> {
+  const tweet = selectedCommentsTweet()
   if (!tweet) return false
   try {
     await openPost(tweet)
-    setStatus("Opened the selected comment on X", COLORS.green)
+    setStatus("Opened the selected post on X", COLORS.green)
   } catch (error) {
     setStatus(`Could not open X: ${error instanceof Error ? error.message : String(error)}`, COLORS.error)
   }
@@ -1497,7 +1506,7 @@ function tweetQuoteCount(tweet: TweetData): number {
 }
 
 function selectedImageTweet(): TweetData | null {
-  if (currentView === "comments") return commentTweets[selectedCommentIndex] ?? commentsRootTweet
+  if (currentView === "comments") return selectedCommentsTweet()
   const state = timelineState()
   return state?.tweets[state.selectedIndex] ?? null
 }
@@ -2158,11 +2167,11 @@ function createCommentsPostCard(
     paddingLeft: 1,
     paddingRight: 1,
     marginBottom: isRoot ? 1 : 0,
-    backgroundColor: isRoot ? COLORS.panel : COLORS.card,
+    backgroundColor: COLORS.card,
     border: true,
     borderStyle: isRoot ? "double" : "rounded",
-    borderColor: isRoot ? COLORS.borderActive : COLORS.border,
-    title: isRoot ? "SELECTED POST" : undefined,
+    borderColor: COLORS.border,
+    title: isRoot ? "POST" : undefined,
     titleColor: isRoot ? COLORS.accent : undefined,
     flexShrink: 0,
   })
@@ -2178,13 +2187,13 @@ function createCommentsPostCard(
     }),
   )
   const openMedia = (mediaTweet: TweetData, media: TweetMedia) => {
-    if (!isRoot) selectComment(index, false)
+    selectCommentsItem(index, false)
     openImageView(mediaTweet, media)
   }
   addPostMedia(card, tweet, index, `${idPrefix}-media`, openMedia)
   addQuotedPost(card, tweet, index, idPrefix, openMedia)
   addPostMetrics(card, tweet, index, idPrefix)
-  if (!isRoot) makeClickable(card, () => selectComment(index), undefined, false)
+  makeClickable(card, () => selectCommentsItem(index), undefined, false)
   return card
 }
 
@@ -2243,11 +2252,9 @@ function setTimelineStatus(state: TimelineStreamState, message: string, color: s
 }
 
 function clearCommentsContent(): void {
-  for (const card of commentCards) card.destroyRecursively()
-  commentCards = []
-  commentTweets = []
+  commentsItems = []
   commentTweetIds.clear()
-  selectedCommentIndex = -1
+  selectedCommentsIndex = -1
   commentsStateText?.destroyRecursively()
   commentsStateText = null
   if (!commentsFeed) return
@@ -2259,34 +2266,41 @@ function setCommentsState(message: string, color: string = COLORS.secondary): vo
   commentsStateText.content = t`${bold(fg(color)(message))}`
 }
 
+function commentCount(): number {
+  return commentsItems.length > 0 && commentsItems[0]?.kind === "root" ? commentsItems.length - 1 : commentsItems.length
+}
+
 function appendComments(tweets: readonly TweetData[]): number {
   if (!commentsFeed || !commentsStateText) return 0
   let added = 0
   for (const tweet of tweets) {
-    if (tweet.id === commentsRootTweet?.id || commentTweetIds.has(tweet.id)) continue
-    const card = createCommentsPostCard(commentsFeed, tweet, commentCards.length, "x-comment")
+    if (commentTweetIds.has(tweet.id)) continue
+    const index = commentsItems.length
+    const card = createCommentsPostCard(commentsFeed, tweet, index, "x-comment")
     commentTweetIds.add(tweet.id)
-    commentTweets.push(tweet)
-    commentCards.push(card)
+    commentsItems.push({ kind: "comment", tweet, card })
     commentsFeed.insertBefore(card, commentsStateText)
     added += 1
   }
-  if (selectedCommentIndex < 0 && commentCards.length > 0) selectComment(0, false)
   return added
 }
 
-function selectComment(nextIndex: number, scrollIntoView: boolean = true): void {
-  if (!commentsFeed || commentCards.length === 0) return
-  selectedCommentIndex = Math.max(0, Math.min(nextIndex, commentCards.length - 1))
-  for (const [index, card] of commentCards.entries()) {
-    const selected = index === selectedCommentIndex
-    card.backgroundColor = selected ? COLORS.cardActive : COLORS.card
-    card.borderColor = selected ? COLORS.borderActive : COLORS.border
+function selectCommentsItem(nextIndex: number, scrollIntoView: boolean = true): void {
+  if (!commentsFeed || commentsItems.length === 0) return
+  selectedCommentsIndex = Math.max(0, Math.min(nextIndex, commentsItems.length - 1))
+  for (const [index, item] of commentsItems.entries()) {
+    const selected = index === selectedCommentsIndex
+    item.card.backgroundColor = selected ? COLORS.cardActive : COLORS.card
+    item.card.borderColor = selected ? COLORS.borderActive : COLORS.border
+    if (item.kind === "root") {
+      item.card.title = selected ? "SELECTED POST" : "POST"
+      item.card.titleColor = selected ? COLORS.accent : COLORS.secondary
+    }
   }
 
-  const selectedCard = commentCards[selectedCommentIndex]
+  const selectedCard = commentsItems[selectedCommentsIndex]?.card
   if (scrollIntoView && selectedCard) commentsFeed.scrollChildIntoView(selectedCard.id)
-  if (selectedCommentIndex >= commentTweets.length - 5) void loadCommentsPage()
+  if (selectedCommentsIndex > 0 && selectedCommentsIndex >= commentsItems.length - 5) void loadCommentsPage()
 }
 
 function closeCommentsView(): boolean {
@@ -2341,7 +2355,11 @@ async function openCommentsView(): Promise<boolean> {
   timelineReturnState = { stream: state.stream }
   clearCommentsContent()
   commentsFeed.scrollTop = 0
-  commentsFeed.add(createCommentsPostCard(commentsFeed, tweet, 0, "x-comments-root"))
+  const rootCard = createCommentsPostCard(commentsFeed, tweet, 0, "x-comments-root")
+  commentsFeed.add(rootCard)
+  commentsItems.push({ kind: "root", tweet, card: rootCard })
+  commentTweetIds.add(tweet.id)
+  selectCommentsItem(0, false)
   commentsFeed.add(
     new TextRenderable(commentsFeed.ctx, {
       id: "x-comments-heading",
@@ -3193,19 +3211,19 @@ function registerXKeymap(renderer: CliRenderer): ConfigIssue[] {
         {
           name: "x.comments.next",
           run() {
-            selectComment(selectedCommentIndex + 1)
+            selectCommentsItem(selectedCommentsIndex + 1)
           },
         },
         {
           name: "x.comments.previous",
           run() {
-            selectComment(selectedCommentIndex - 1)
+            selectCommentsItem(selectedCommentsIndex - 1)
           },
         },
         {
           name: "x.comments.open",
           run() {
-            return openSelectedComment()
+            return openSelectedCommentsTweet()
           },
         },
         {
@@ -3603,7 +3621,8 @@ async function loadCommentsPage(): Promise<void> {
     appendComments(result.tweets)
     commentsCursor = result.nextCursor === cursor ? null : result.nextCursor
     commentsHasMore = commentsCursor !== null
-    if (commentCards.length === 0) {
+    const count = commentCount()
+    if (count === 0) {
       setCommentsState(
         connectionMode === "official"
           ? "NO RECENT DIRECT REPLIES FOUND · X SEARCH COVERS THE LAST 7 DAYS"
@@ -3614,7 +3633,7 @@ async function loadCommentsPage(): Promise<void> {
       setCommentsState(commentsHasMore ? "SCROLL FOR MORE" : "END OF COMMENTS", COLORS.muted)
     }
     setStatus(
-      `${commentCards.length} comment${commentCards.length === 1 ? "" : "s"} · ${commentsHasMore ? "scroll for more" : "end of comments"}`,
+      `${count} comment${count === 1 ? "" : "s"} · ${commentsHasMore ? "scroll for more" : "end of comments"}`,
       COLORS.green,
     )
   } catch (error) {
@@ -3627,7 +3646,7 @@ async function loadCommentsPage(): Promise<void> {
     }
     commentsHasMore = false
     setCommentsState(
-      commentCards.length === 0 ? `COMMENTS UNAVAILABLE · ${message}` : `COULD NOT LOAD MORE · ${message}`,
+      commentCount() === 0 ? `COMMENTS UNAVAILABLE · ${message}` : `COULD NOT LOAD MORE · ${message}`,
       COLORS.error,
     )
     setStatus("Could not load comments", COLORS.error)
@@ -3763,10 +3782,9 @@ export function run(renderer: CliRenderer, options: XDemoRunOptions = {}): void 
   currentView = "timeline"
   timelineReturnState = null
   commentsRootTweet = null
-  commentCards = []
-  commentTweets = []
+  commentsItems = []
   commentTweetIds.clear()
-  selectedCommentIndex = -1
+  selectedCommentsIndex = -1
   commentsCursor = null
   commentsHasMore = false
   commentsLoading = false
@@ -4015,10 +4033,9 @@ export function destroy(): void {
   headerFollowingText = null
   headerActionText = null
   footer = null
-  commentCards = []
-  commentTweets = []
+  commentsItems = []
   commentTweetIds.clear()
-  selectedCommentIndex = -1
+  selectedCommentsIndex = -1
   commentsStateText = null
 }
 
