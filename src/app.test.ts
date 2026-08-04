@@ -1087,12 +1087,18 @@ describe("xtui application", () => {
       await app.setup.waitForFrame((frame) => frame.includes("CONNECT X"))
       await loginOfficial(app, "mouse-scroll-token")
       await waitForApiFrame(app, 2, (frame) => frame.includes("Post 1"))
+      await app.setup.flush({ maxPasses: 100 })
       const feed = getScrollBox(app, "x-feed")
+      expect(feed.scrollHeight).toBeGreaterThan(feed.viewport.height)
       const x = feed.viewport.screenX + Math.floor(feed.viewport.width / 2)
       const y = feed.viewport.screenY + Math.floor(feed.viewport.height / 2)
       const initialScrollTop = feed.scrollTop
 
-      for (let index = 0; index < feed.scrollHeight && app.api.requests.length < 3; index += 1) {
+      for (
+        let index = 0;
+        index < feed.scrollHeight && (feed.scrollTop === initialScrollTop || app.api.requests.length < 3);
+        index += 1
+      ) {
         await app.setup.mockMouse.scroll(x, y, "down")
         await app.setup.renderOnce()
       }
