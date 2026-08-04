@@ -996,23 +996,31 @@ describe("xtui application", () => {
 
       app.setup.mockInput.pressKey("i")
       const firstFrame = await app.setup.waitForFrame((frame) => frame.includes("IMAGE · 1/2 · 100%"))
-      expect(firstFrame).toContain("7 replies   3 quotes   9 likes")
+      expect(firstFrame).toContain("↩ 7   ♥ 9   ↻ 5")
       expect(firstFrame).not.toContain("FOLLOWING  TAB SWITCH")
       const overlay = app.setup.renderer.root.findDescendantById("x-image-view")
       const appRoot = app.setup.renderer.root.findDescendantById("x-demo-root")
       const image = getImage(app, "x-image-view-image")
+      const viewport = app.setup.renderer.root.findDescendantById("x-image-viewport")!
+      const metrics = app.setup.renderer.root.findDescendantById("x-image-view-metrics") as TextRenderable
       expect(overlay?.visible).toBe(true)
       expect(appRoot?.visible).toBe(false)
       expect(app.setup.renderer.currentFocusedRenderable?.id).toBe("x-image-view")
       expect(image.source).toBe(RED_PNG_DATA_URL)
       await image.loadPromise
       await app.setup.flush({ maxPasses: 50 })
+      expect(metrics.screenY).toBe(viewport.screenY + viewport.height - 1)
+      expect(metrics.bg.toInts()).toEqual([0, 0, 0, 0])
+      const metricChunk = (icon: string) => metrics.content.chunks.find((chunk) => chunk.text.startsWith(icon))!
+      expect(metricChunk("↩").fg?.toInts()).toEqual([113, 118, 123, 255])
+      expect(metricChunk("♥").fg?.toInts()).toEqual([249, 24, 128, 255])
+      expect(metricChunk("↻").fg?.toInts()).toEqual([0, 186, 124, 255])
 
       app.setup.renderer.resize(80, 30)
       await app.setup.renderOnce()
       const resizedViewport = app.setup.renderer.root.findDescendantById("x-image-viewport")
       expect(resizedViewport?.width).toBe(80)
-      expect(resizedViewport?.height).toBe(28)
+      expect(resizedViewport?.height).toBe(29)
       expect(image.width).toBe(80)
       app.setup.renderer.resize(100, 50)
       await app.setup.renderOnce()
@@ -1044,7 +1052,6 @@ describe("xtui application", () => {
       for (let step = 0; step < 100; step += 1) app.setup.mockInput.pressKey("h")
       for (let step = 0; step < 100; step += 1) app.setup.mockInput.pressKey("j")
       await app.setup.renderOnce()
-      const viewport = app.setup.renderer.root.findDescendantById("x-image-viewport")!
       const fitted = image.getFittedSize(image.width, image.height)
       const fittedLeft = Number(image.left) + Math.floor((image.width - fitted.width) / 2)
       const fittedTop = Number(image.top) + Math.floor((image.height - fitted.height) / 2)
@@ -1053,7 +1060,7 @@ describe("xtui application", () => {
 
       app.setup.mockInput.pressArrow("right")
       const secondFrame = await app.setup.waitForFrame((frame) => frame.includes("IMAGE · 2/2 · 100%"))
-      expect(secondFrame).toContain("7 replies   3 quotes   9 likes")
+      expect(secondFrame).toContain("↩ 7   ♥ 9   ↻ 5")
       for (let pass = 0; pass < 20 && image.source !== BLUE_PNG_DATA_URL; pass += 1) {
         await Bun.sleep(0)
         await app.setup.renderOnce()
@@ -1140,7 +1147,7 @@ describe("xtui application", () => {
 
       app.setup.mockInput.pressKey("i")
       const rootImageFrame = await app.setup.waitForFrame((frame) => frame.includes("IMAGE · 100%"))
-      expect(rootImageFrame).toContain("1 replies   3 quotes   7 likes")
+      expect(rootImageFrame).toContain("↩ 1   ♥ 7   ↻ 5")
       expect(getImage(app, "x-image-view-image").source).toBe(RED_PNG_DATA_URL)
 
       app.setup.mockInput.pressEscape()
@@ -1153,7 +1160,7 @@ describe("xtui application", () => {
 
       app.setup.mockInput.pressKey("i")
       const commentImageFrame = await app.setup.waitForFrame((frame) => frame.includes("IMAGE · 100%"))
-      expect(commentImageFrame).toContain("2 replies   4 quotes   8 likes")
+      expect(commentImageFrame).toContain("↩ 2   ♥ 8   ↻ 6")
       expect(getImage(app, "x-image-view-image").source).toBe(BLUE_PNG_DATA_URL)
 
       app.setup.mockInput.pressEscape()
@@ -1980,7 +1987,7 @@ describe("xtui application", () => {
 
       app.setup.mockInput.pressKey("i")
       const imageFrame = await app.setup.waitForFrame((value) => value.includes("IMAGE · 100%"))
-      expect(imageFrame).toContain("21 replies   7 quotes   46 likes")
+      expect(imageFrame).toContain("↩ 21   ♥ 46   ↻ 1")
       expect(getImage(app, "x-image-view-image").source).toBe(RED_PNG_DATA_URL)
       app.setup.mockInput.pressEscape()
 

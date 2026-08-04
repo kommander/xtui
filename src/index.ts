@@ -92,7 +92,7 @@ const IMAGE_MIN_ZOOM = 0.5
 const IMAGE_MAX_ZOOM = 4
 const IMAGE_PAN_COLUMNS = 2
 const IMAGE_PAN_ROWS = 1
-const IMAGE_CHROME_ROWS = 2
+const IMAGE_CHROME_ROWS = 1
 const POST_PREVIEW_GRAPHEMES = 280
 const X_API_BASE_URL = "https://api.x.com"
 const COMMENTS_PAGE_SIZE = 100
@@ -423,7 +423,6 @@ interface RepostContext {
 }
 
 type AppTweetData = TweetData & {
-  quoteCount?: number
   wrapperUrls?: string[]
   timelineItemId?: string
   repostedBy?: RepostContext
@@ -785,17 +784,11 @@ function prepareBirdRawTweet(
   }
 }
 
-function applyBirdQuoteCounts(tweet: TweetData, raw: BirdRawTweet | undefined): void {
-  ;(tweet as AppTweetData).quoteCount = raw?.legacy?.quote_count
-  if (tweet.quotedTweet) applyBirdQuoteCounts(tweet.quotedTweet, unwrapBirdRawTweet(raw?.quoted_status_result?.result))
-}
-
 function mapBirdOriginal(value: BirdRawTweet | undefined): TweetData | null {
   const raw = prepareBirdRawTweet(value)
   if (!raw) return null
   const mapped = mapTweetResult(raw as Parameters<typeof mapTweetResult>[0], { quoteDepth: 1, includeRaw: true })
   if (!mapped) return null
-  applyBirdQuoteCounts(mapped, raw)
   return mapped
 }
 
@@ -841,7 +834,6 @@ function mapOfficialPosts(response: XApiResponse<XApiPost[]>, fallbackAuthor: XA
       authorId: post.author_id,
       createdAt: post.created_at,
       replyCount: post.public_metrics?.reply_count,
-      quoteCount: post.public_metrics?.quote_count,
       retweetCount: post.public_metrics?.retweet_count,
       likeCount: post.public_metrics?.like_count,
       media: mapOfficialMedia(post, mediaByKey),
@@ -1387,6 +1379,14 @@ function postToggleContent(expanded: boolean): StyledText {
   return t`${bold(fg(COLORS.amber)(`[${formatCommandKey("x.feed.toggle-expanded")}] ${expanded ? "Show Less" : "Show More"}`))}`
 }
 
+function postMetricItems(tweet: TweetData) {
+  return [
+    { id: "replies", content: `↩ ${compactCount(tweet.replyCount)}`, color: COLORS.secondary, align: "flex-start" },
+    { id: "likes", content: `♥ ${compactCount(tweet.likeCount)}`, color: COLORS.pink, align: "center" },
+    { id: "reposts", content: `↻ ${compactCount(tweet.retweetCount)}`, color: COLORS.green, align: "flex-end" },
+  ] as const
+}
+
 function addPostMetrics(
   card: BoxRenderable,
   tweet: TweetData,
@@ -1402,12 +1402,7 @@ function addPostMetrics(
     flexDirection: "row",
     flexShrink: 0,
   })
-  const metrics = [
-    { id: "replies", content: `↩ ${compactCount(tweet.replyCount)}`, color: COLORS.secondary, align: "flex-start" },
-    { id: "likes", content: `♥ ${compactCount(tweet.likeCount)}`, color: COLORS.pink, align: "center" },
-    { id: "reposts", content: `↻ ${compactCount(tweet.retweetCount)}`, color: COLORS.green, align: "flex-end" },
-  ] as const
-  for (const metric of metrics) {
+  for (const metric of postMetricItems(tweet)) {
     const cell = new BoxRenderable(card.ctx, {
       id: `${idPrefix}-${metric.id}-${index}`,
       height: 1,
@@ -1498,13 +1493,6 @@ function viewableImages(tweet: TweetData): TweetMedia[] {
   return (tweet.media ?? []).filter((media) => media.type === "photo" && Boolean(media.url || media.previewUrl))
 }
 
-function tweetQuoteCount(tweet: TweetData): number {
-  const direct = (tweet as AppTweetData).quoteCount
-  const raw = tweet._raw as { legacy?: { quote_count?: unknown } } | undefined
-  const value = direct ?? raw?.legacy?.quote_count
-  return typeof value === "number" && Number.isFinite(value) ? value : 0
-}
-
 function selectedImageTweet(): TweetData | null {
   if (currentView === "comments") return selectedCommentsTweet()
   const state = timelineState()
@@ -1518,8 +1506,9 @@ function updateImageViewText(): void {
   const panKeys = ["x.image.pan-left", "x.image.pan-down", "x.image.pan-up", "x.image.pan-right"]
     .map((command) => formatCommandKey(command as XtuiCommandName))
     .join("/")
+  const metrics = postMetricItems(imageTweet)
   imageHeaderText.content = t`${bold(fg(COLORS.primary)(`IMAGE · ${position}${Math.round(imageZoom * 100)}%`))}${fg(COLORS.secondary)(`   ${formatCommandKey("x.image.previous")}/${formatCommandKey("x.image.next")} image   ${formatCommandKey("x.image.zoom-in")}/${formatCommandKey("x.image.zoom-out")} zoom   ${panKeys} pan   ${formatCommandKey("x.image.close")} back${status}`)}`
-  imageMetricsText.content = t`${fg(COLORS.secondary)(`${compactCount(imageTweet.replyCount)} replies   ${compactCount(tweetQuoteCount(imageTweet))} quotes   ${compactCount(imageTweet.likeCount)} likes`)}`
+  imageMetricsText.content = t`${fg(metrics[0].color)(metrics[0].content)}   ${fg(metrics[1].color)(metrics[1].content)}   ${fg(metrics[2].color)(metrics[2].content)}`
 }
 
 function layoutImageView(width?: number, height?: number): void {
@@ -1701,17 +1690,20 @@ function createImageView(renderer: CliRenderer): BoxRenderable {
   })
   imageMetricsText = new TextRenderable(renderer, {
     id: "x-image-view-metrics",
+    position: "absolute",
+    left: 0,
+    bottom: 0,
     width: "100%",
     height: 1,
-    flexShrink: 0,
+    zIndex: 2,
     bg: "transparent",
     wrapMode: "none",
     selectable: false,
   })
   imageOverlay.add(imageHeaderText)
   imageViewport.add(imageRenderable)
+  imageViewport.add(imageMetricsText)
   imageOverlay.add(imageViewport)
-  imageOverlay.add(imageMetricsText)
   return imageOverlay
 }
 
