@@ -87,6 +87,7 @@ const COOKIE_REFRESH_COOLDOWN_MS = 60_000
 const REQUEST_TIMEOUT_MS = 20_000
 const MEDIA_MIN_ROWS = 5
 const MEDIA_MAX_ROWS = 18
+const MEDIA_CARD_HORIZONTAL_INSET = 4
 const IMAGE_ZOOM_STEP = 0.25
 const IMAGE_MIN_ZOOM = 0.5
 const IMAGE_MAX_ZOOM = 4
@@ -1969,9 +1970,9 @@ function addPostMedia(
   postIndex: number,
   idPrefix: string = "x-post-media",
   onOpen?: (tweet: TweetData, media: TweetMedia) => void,
-): void {
+): (() => void) | undefined {
   const mediaItems = displayMediaItems(tweet)
-  if (mediaItems.length === 0) return
+  if (mediaItems.length === 0) return undefined
   const visibleMedia = mediaItems.slice(0, 4)
   const isMosaic = visibleMedia.length > 1
 
@@ -1989,11 +1990,13 @@ function addPostMedia(
   let firstImage: ImageRenderable | null = null
   let mosaicHeightUpdateQueued = false
   const horizontalGapContainers: BoxRenderable[] = []
+  const singleHeightUpdates: Array<() => void> = []
   const updateMosaicHeight = () => {
     mosaicHeightUpdateQueued = false
-    if (!isMosaic || !firstImage || mediaBox.isDestroyed || mediaBox.width <= 0) return
-    for (const container of horizontalGapContainers) container.columnGap = mediaBox.width < 3 ? 0 : 1
-    const nextHeight = Math.max(MEDIA_MIN_ROWS, Math.round((mediaBox.width * 9) / (16 * firstImage.cellAspectRatio)))
+    const mediaWidth = Math.max(0, card.width - MEDIA_CARD_HORIZONTAL_INSET)
+    if (!isMosaic || !firstImage || mediaBox.isDestroyed || mediaWidth <= 0) return
+    for (const container of horizontalGapContainers) container.columnGap = mediaWidth < 3 ? 0 : 1
+    const nextHeight = Math.max(MEDIA_MIN_ROWS, Math.round((mediaWidth * 9) / (16 * firstImage.cellAspectRatio)))
     if (mediaBox.height !== nextHeight) mediaBox.height = nextHeight
   }
   const scheduleMosaicHeightUpdate = () => {
@@ -2039,8 +2042,9 @@ function addPostMedia(
 
     const updateHeight = () => {
       heightUpdateQueued = false
-      if (isMosaic || image.isDestroyed || tile.width <= 0 || sourceWidth <= 0 || sourceHeight <= 0) return
-      const naturalRows = Math.round((tile.width * sourceHeight) / (sourceWidth * image.cellAspectRatio))
+      const mediaWidth = Math.max(0, card.width - MEDIA_CARD_HORIZONTAL_INSET)
+      if (isMosaic || image.isDestroyed || mediaWidth <= 0 || sourceWidth <= 0 || sourceHeight <= 0) return
+      const naturalRows = Math.round((mediaWidth * sourceHeight) / (sourceWidth * image.cellAspectRatio))
       const nextHeight = Math.max(MEDIA_MIN_ROWS, Math.min(MEDIA_MAX_ROWS, naturalRows))
       if (tile.height !== nextHeight) tile.height = nextHeight
     }
@@ -2049,6 +2053,7 @@ function addPostMedia(
       heightUpdateQueued = true
       queueMicrotask(updateHeight)
     }
+    if (!isMosaic) singleHeightUpdates.push(scheduleHeightUpdate)
     const handleMediaFailure = (error: unknown) => {
       if (failureReported) return
       failureReported = true
@@ -2160,6 +2165,7 @@ function addPostMedia(
 
   card.add(mediaBox)
   scheduleMosaicHeightUpdate()
+  return isMosaic ? scheduleMosaicHeightUpdate : () => singleHeightUpdates.forEach((schedule) => schedule())
 }
 
 function addQuotedPost(
@@ -2192,6 +2198,7 @@ function addQuotedPost(
       id: `${idPrefix}-quote-content-${postIndex}`,
       content: styledMentions(cleanPostText(displayPostText(quoted)), COLORS.secondary),
       width: "100%",
+      marginTop: 1,
       wrapMode: "word",
       selectable: true,
     }),
@@ -2286,6 +2293,8 @@ function toggleSelectedPostExpansion(): boolean {
 
 function createPostCard(state: TimelineStreamState, tweet: TweetData, index: number): BoxRenderable {
   const itemId = timelineItemId(tweet)
+  let scheduleMediaLayout: (() => void) | undefined
+  let mediaLayoutWidth = -1
   const card = new BoxRenderable(state.feed.ctx, {
     id: `x-post-${itemId}`,
     width: "100%",
@@ -2297,6 +2306,11 @@ function createPostCard(state: TimelineStreamState, tweet: TweetData, index: num
     borderColor: COLORS.border,
     flexShrink: 0,
   })
+  card.onSizeChange = () => {
+    if (card.width === mediaLayoutWidth) return
+    mediaLayoutWidth = card.width
+    scheduleMediaLayout?.()
+  }
   makeClickable(
     card,
     () => selectPost(state, index),
@@ -2309,6 +2323,7 @@ function createPostCard(state: TimelineStreamState, tweet: TweetData, index: num
     id: `x-post-content-${index}`,
     content: postBodyContent(tweet, state.expandedPostIds.has(itemId)),
     width: "100%",
+    marginTop: 1,
     wrapMode: "word",
     selectable: true,
   })
@@ -2337,7 +2352,7 @@ function createPostCard(state: TimelineStreamState, tweet: TweetData, index: num
     selectPost(state, index, false)
     openImageView(mediaTweet, media)
   }
-  addPostMedia(card, tweet, index, "x-post-media", openMedia)
+  scheduleMediaLayout = addPostMedia(card, tweet, index, "x-post-media", openMedia)
   addQuotedPost(card, tweet, index, "x-post", openMedia)
   addPostMetrics(card, tweet, index, "x-post", () => {
     if (currentStream !== state.stream) return false
@@ -2375,6 +2390,7 @@ function createCommentsPostCard(
       id: `${idPrefix}-content-${index}`,
       content: postBodyContent(tweet, true),
       width: "100%",
+      marginTop: 1,
       wrapMode: "word",
       selectable: true,
     }),

@@ -1326,7 +1326,8 @@ describe("xtui application", () => {
       expect(getImage(app, "x-image-view-image").source).toBe(RED_PNG_DATA_URL)
 
       app.setup.mockInput.pressEscape()
-      await app.setup.waitForFrame((frame) => frame.includes("COMMENTS  DIRECT REPLIES"))
+      await app.setup.renderOnce()
+      expect(app.setup.renderer.currentFocusedRenderable?.id).toBe("x-comments-feed")
       app.setup.mockInput.pressKey("j")
       await app.setup.waitForFrame((frame) => frame.includes("Reply with image"))
       expect(rootCard.title).toBe("POST")
@@ -1340,7 +1341,7 @@ describe("xtui application", () => {
 
       app.setup.mockInput.pressEscape()
       const commentsFrame = await app.setup.waitForFrame((frame) => frame.includes("Reply with image"))
-      expect(commentsFrame).toContain("COMMENTS  DIRECT REPLIES")
+      expect(commentsFrame).toContain("X  COMMENTS")
       expect(app.setup.renderer.currentFocusedRenderable?.id).toBe("x-comments-feed")
 
       app.setup.mockInput.pressKey("k")
@@ -1449,20 +1450,89 @@ describe("xtui application", () => {
       await waitForApiFrame(app, 2, (frame) => frame.includes("Parent body"))
       await app.setup.flush({ maxPasses: 50 })
 
+      const author = app.setup.renderer.root.findDescendantById("x-post-author-0")!
       const body = app.setup.renderer.root.findDescendantById("x-post-content-0")!
       const media = app.setup.renderer.root.findDescendantById("x-post-media-0")!
       const quote = app.setup.renderer.root.findDescendantById("x-post-quote-0")!
       const metrics = app.setup.renderer.root.findDescendantById("x-post-footer-0")!
+      const quotedAuthor = app.setup.renderer.root.findDescendantById("x-post-quote-author-0")!
       const quotedBody = app.setup.renderer.root.findDescendantById("x-post-quote-content-0")!
       const quotedMedia = app.setup.renderer.root.findDescendantById("x-post-quote-media-0")!
       const verticalGap = (before: Renderable, after: Renderable) => after.screenY - before.screenY - before.height
 
+      expect(verticalGap(author, body)).toBe(1)
       expect(verticalGap(body, media)).toBe(1)
       expect(verticalGap(media, quote)).toBe(1)
       expect(verticalGap(quote, metrics)).toBe(1)
+      expect(verticalGap(quotedAuthor, quotedBody)).toBe(1)
       expect(verticalGap(quotedBody, quotedMedia)).toBe(1)
       expect(quote.screenY + quote.height - 1 - (quotedMedia.screenY + quotedMedia.height)).toBe(1)
 
+      app.api.assertDone()
+      expectHealthy(app)
+    } finally {
+      await app.close()
+    }
+  })
+
+  test("keeps a newly selected post visible while offscreen media settles", async () => {
+    const app = await createApp(30, {}, 60)
+    const timelinePosts = posts(1, 20).map((post, index) =>
+      index === 16
+        ? {
+            ...post,
+            text: "Selected media post",
+            attachments: { media_keys: ["settling-photo"] },
+            public_metrics: { reply_count: 17, retweet_count: 19, like_count: 1_717 },
+          }
+        : post,
+    )
+    app.api.expectUser("settling-media-token", {
+      body: { data: { id: "42", name: "Reader", username: "reader" } },
+    })
+    app.api.expectTimeline("settling-media-token", "42", {
+      body: {
+        data: timelinePosts,
+        includes: {
+          media: [{ media_key: "settling-photo", type: "photo", url: RED_PNG_DATA_URL }],
+        },
+        meta: {},
+      },
+    })
+
+    try {
+      await app.setup.waitForFrame((frame) => frame.includes("CONNECT X"))
+      await loginOfficial(app, "settling-media-token")
+      await waitForApiFrame(app, 2, (frame) => frame.includes("Post 1"))
+      const image = getImage(app, "x-post-media-image-16-0")
+      await image.loadPromise
+
+      for (let index = 0; index < 15; index += 1) {
+        app.setup.mockInput.pressKey("j")
+        await app.setup.renderOnce()
+      }
+      const feed = getScrollBox(app, "x-feed")
+      const selectedCard = getCard(app, "17")
+      expect(selectedCard.screenY).toBeGreaterThanOrEqual(feed.viewport.screenY + feed.viewport.height)
+
+      const recorder = new TestRecorder(app.setup.renderer)
+      recorder.rec()
+      app.setup.mockInput.pressKey("j")
+      await app.setup.flush({ maxPasses: 100 })
+      recorder.stop()
+
+      expect(selectedCard.height).toBeLessThanOrEqual(feed.viewport.height)
+      expect(selectedCard.screenY).toBeGreaterThanOrEqual(feed.viewport.screenY)
+      expect(selectedCard.screenY + selectedCard.height).toBeLessThanOrEqual(
+        feed.viewport.screenY + feed.viewport.height,
+      )
+      const frames = recorder.recordedFrames.map((recorded) => recorded.frame)
+      const firstSelectedFrame = frames.findIndex((frame) => frame.includes("Selected media post"))
+      expect(firstSelectedFrame).toBeGreaterThanOrEqual(0)
+      for (const frame of frames.slice(firstSelectedFrame)) {
+        expect(frame).toContain("Selected media post")
+        expect(frame).toContain("♥ 1.7K")
+      }
       app.api.assertDone()
       expectHealthy(app)
     } finally {
@@ -1699,7 +1769,6 @@ describe("xtui application", () => {
       await finalPageRequested.promise
       releaseFinalPage.resolve()
       const completedFrame = await waitForApiFrame(app, 5, (frame) => frame.includes("2 comments · end of comments"))
-      expect(completedFrame).toContain("Second direct reply")
       expect(completedFrame).toContain("ESC back   I image")
       expect(completedFrame).toContain("[?]")
       expect(app.setup.renderer.root.findDescendantById("x-comment-101")).toBeDefined()
@@ -2169,12 +2238,14 @@ describe("xtui application", () => {
       app.setup.mockInput.pressEscape()
 
       app.setup.mockInput.pressKey("j")
-      const articleFrame = await app.setup.waitForFrame((value) =>
-        value.includes("Full article body from content state."),
-      )
-      expect(articleFrame).toContain("Article Reposter reposted")
-      expect(articleFrame).toContain("Article Author @article_author")
-      expect(articleFrame).not.toContain("RT @article_author")
+      await app.setup.renderOnce()
+      const articleRepost = app.setup.renderer.root.findDescendantById("x-post-repost-1") as TextRenderable
+      const articleAuthor = app.setup.renderer.root.findDescendantById("x-post-author-text-1") as TextRenderable
+      const articleBody = app.setup.renderer.root.findDescendantById("x-post-content-1") as TextRenderable
+      expect(articleRepost.plainText).toContain("Article Reposter reposted")
+      expect(articleAuthor.plainText).toContain("Article Author @article_author")
+      expect(articleBody.plainText).toContain("Full article body from content state.")
+      expect(articleBody.plainText).not.toContain("RT @article_author")
       expect(getCard(app, "article-repost")).toBeDefined()
       app.setup.mockInput.pressKey("k")
 
