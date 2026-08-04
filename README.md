@@ -117,10 +117,10 @@ Every application command can be rebound to one OpenTUI key stroke. Single keys 
 | `x.image.previous`       | `left`   |
 | `x.image.zoom-in`        | `+`      |
 | `x.image.zoom-out`       | `-`      |
-| `x.image.pan-left`       | `h`      |
-| `x.image.pan-down`       | `j`      |
-| `x.image.pan-up`         | `k`      |
-| `x.image.pan-right`      | `l`      |
+| `x.image.pan-left`       | `l`      |
+| `x.image.pan-down`       | `k`      |
+| `x.image.pan-up`         | `j`      |
+| `x.image.pan-right`      | `h`      |
 | `x.image.close`          | `escape` |
 | `x.modal.back`           | `escape` |
 | `app.console`            | `` ` ``  |

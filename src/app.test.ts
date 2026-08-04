@@ -1032,8 +1032,14 @@ describe("xtui application", () => {
       app.setup.mockInput.pressKey("h")
       app.setup.mockInput.pressKey("j")
       await app.setup.renderOnce()
-      expect(Number(image.left)).toBeLessThan(centeredLeft)
-      expect(Number(image.top)).toBeGreaterThan(centeredTop)
+      expect(Number(image.left)).toBeGreaterThan(centeredLeft)
+      expect(Number(image.top)).toBeLessThan(centeredTop)
+
+      app.setup.mockInput.pressKey("l")
+      app.setup.mockInput.pressKey("k")
+      await app.setup.renderOnce()
+      expect(Number(image.left)).toBe(centeredLeft)
+      expect(Number(image.top)).toBe(centeredTop)
 
       for (let step = 0; step < 100; step += 1) app.setup.mockInput.pressKey("h")
       for (let step = 0; step < 100; step += 1) app.setup.mockInput.pressKey("j")
@@ -1042,8 +1048,8 @@ describe("xtui application", () => {
       const fitted = image.getFittedSize(image.width, image.height)
       const fittedLeft = Number(image.left) + Math.floor((image.width - fitted.width) / 2)
       const fittedTop = Number(image.top) + Math.floor((image.height - fitted.height) / 2)
-      expect(fittedLeft + fitted.width).toBe(viewport.width)
-      expect(fittedTop).toBe(0)
+      expect(fittedLeft).toBe(0)
+      expect(fittedTop + fitted.height).toBe(viewport.height)
 
       app.setup.mockInput.pressArrow("right")
       const secondFrame = await app.setup.waitForFrame((frame) => frame.includes("IMAGE · 2/2 · 100%"))

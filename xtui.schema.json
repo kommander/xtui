@@ -127,25 +127,25 @@
           "type": "string",
           "minLength": 1,
           "description": "A single OpenTUI key stroke, such as j, escape, or ctrl+c.",
-          "default": "h"
+          "default": "l"
         },
         "x.image.pan-down": {
           "type": "string",
           "minLength": 1,
           "description": "A single OpenTUI key stroke, such as j, escape, or ctrl+c.",
-          "default": "j"
+          "default": "k"
         },
         "x.image.pan-up": {
           "type": "string",
           "minLength": 1,
           "description": "A single OpenTUI key stroke, such as j, escape, or ctrl+c.",
-          "default": "k"
+          "default": "j"
         },
         "x.image.pan-right": {
           "type": "string",
           "minLength": 1,
           "description": "A single OpenTUI key stroke, such as j, escape, or ctrl+c.",
-          "default": "l"
+          "default": "h"
         },
         "x.image.close": {
           "type": "string",
