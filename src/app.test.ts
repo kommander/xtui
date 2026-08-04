@@ -9,7 +9,7 @@ import {
   type CliRendererHandlerErrorEvent,
   type Renderable,
 } from "@opentui/core"
-import { createTestRenderer, MouseButtons, type TestRendererSetup } from "@opentui/core/testing"
+import { createTestRenderer, MouseButtons, TestRecorder, type TestRendererSetup } from "@opentui/core/testing"
 import { TwitterClient, type TweetData } from "@steipete/bird"
 import { mkdtempSync, rmSync } from "node:fs"
 import { join } from "node:path"
@@ -32,6 +32,8 @@ const COMMENTS_QUERY = {
   "user.fields": "id,name,profile_image_url,username",
   "media.fields": "duration_ms,height,media_key,preview_image_url,type,url,width",
 } as const
+const RED_PNG_DATA_URL =
+  "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR4AWP4z8DwHwAFAAH/e+m+7wAAAABJRU5ErkJggg=="
 
 interface JsonReply {
   body: unknown
@@ -766,6 +768,71 @@ describe("xtui application", () => {
     }
   })
 
+  test("reveals comments only after their media layout is stable", async () => {
+    const app = await createApp(36)
+    const commentsRequested = deferred<void>()
+    const releaseComments = deferred<void>()
+    app.api.expectUser("stable-comments-token", {
+      body: { data: { id: "42", name: "Reader", username: "reader" } },
+    })
+    app.api.expectTimeline("stable-comments-token", "42", {
+      body: {
+        data: [{ id: "7301", text: "Post with media", attachments: { media_keys: ["media-1"] } }],
+        includes: {
+          media: [
+            {
+              media_key: "media-1",
+              type: "photo",
+              url: RED_PNG_DATA_URL,
+              width: 680,
+              height: 594,
+            },
+          ],
+        },
+        meta: {},
+      },
+    })
+    app.api.expectComments("stable-comments-token", "7301", async () => {
+      commentsRequested.resolve()
+      await releaseComments.promise
+      return { body: { data: [], meta: {} } }
+    })
+    const recorder = new TestRecorder(app.setup.renderer)
+
+    try {
+      await app.setup.waitForFrame((frame) => frame.includes("CONNECT X"))
+      await loginOfficial(app, "stable-comments-token")
+      await waitForApiFrame(app, 2, (frame) => frame.includes("Post with media"))
+      await app.setup.flush({ maxPasses: 50 })
+
+      recorder.rec()
+      app.setup.mockInput.pressKey("c")
+      await commentsRequested.promise
+      await app.setup.flush({ maxPasses: 50 })
+      recorder.stop()
+
+      const commentsFrames = recorder.recordedFrames
+        .map((recorded) => recorded.frame)
+        .filter((frame) => frame.includes("SELECTED POST"))
+      expect(commentsFrames.length).toBeGreaterThan(0)
+      const headingRows = commentsFrames.map((frame) =>
+        frame.split("\n").findIndex((line) => line.includes("COMMENTS  DIRECT REPLIES")),
+      )
+      expect(headingRows.every((row) => row >= 0)).toBe(true)
+      expect(new Set(headingRows).size).toBe(1)
+      expect(commentsFrames[0]).toContain("J/K select   O open   ESC back")
+
+      releaseComments.resolve()
+      await app.api.waitForResponseCount(3)
+      app.api.assertDone()
+      expectHealthy(app)
+    } finally {
+      recorder.stop()
+      releaseComments.resolve()
+      await app.close()
+    }
+  })
+
   test("shows paginated comments and restores the exact timeline view", async () => {
     const openedUrls: string[] = []
     const app = await createApp(12, {
@@ -960,7 +1027,8 @@ describe("xtui application", () => {
         await app.setup.renderOnce()
       }
       const commentsFrame = await app.setup.waitForFrame((frame) => frame.includes("2 comments · end of comments"))
-      expect(commentsFrame).toContain("Browser comment two")
+      expect(commentsFrame).toContain("2 comments · end of comments")
+      expect(app.setup.renderer.root.findDescendantById("x-comment-603")).toBeDefined()
       expect(repliesCalls).toEqual([
         {
           tweetId: "601",

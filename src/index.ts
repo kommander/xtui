@@ -404,6 +404,7 @@ let selectedCommentIndex = -1
 let commentsCursor: string | null = null
 let commentsHasMore = false
 let commentsLoading = false
+let commentsPreparing = false
 let commentsGeneration = 0
 let commentsStateText: TextRenderable | null = null
 let commentsScrollListener: (() => void) | null = null
@@ -756,7 +757,7 @@ function formatCommandKey(command: CommandName): string {
 
 function makeClickable(
   target: Renderable,
-  action: () => void | boolean | Promise<void>,
+  action: () => void | boolean | Promise<void | boolean>,
   enabled: () => boolean = () => true,
   preventAutoFocus: boolean = true,
 ): void {
@@ -804,7 +805,7 @@ function addFooterItem(
   key: string,
   label: string,
   color: string = COLORS.accent,
-  action?: () => void | boolean | Promise<void>,
+  action?: () => void | boolean | Promise<void | boolean>,
 ): void {
   if (!footer) return
   const item = new TextRenderable(footer.ctx, {
@@ -822,7 +823,7 @@ function addFooterItem(
 function addCompactFooterItem(
   id: string,
   label: string,
-  action: () => void | boolean | Promise<void>,
+  action: () => void | boolean | Promise<void | boolean>,
   color: string = COLORS.accent,
 ): void {
   if (!footer) return
@@ -1119,7 +1120,7 @@ function addPostMetrics(
   tweet: TweetData,
   index: number,
   idPrefix: string = "x-post",
-  onReplies?: () => void | boolean,
+  onReplies?: () => void | boolean | Promise<boolean>,
 ): void {
   const row = new BoxRenderable(card.ctx, {
     id: `${idPrefix}-footer-${index}`,
@@ -1668,12 +1669,12 @@ function selectComment(nextIndex: number, scrollIntoView: boolean = true): void 
 }
 
 function closeCommentsView(): boolean {
-  if (currentView !== "comments" || !root || !feed || !commentsFeed || !footer) return false
+  if (currentView !== "comments" || !feed || !commentsFeed) return false
   commentsGeneration += 1
   commentsLoading = false
+  commentsPreparing = false
   commentsHasMore = false
-  root.remove(commentsFeed)
-  root.insertBefore(feed, footer)
+  feed.visible = true
   currentView = "timeline"
   commentsRootTweet = null
   updateHeader()
@@ -1686,23 +1687,26 @@ function closeCommentsView(): boolean {
   return true
 }
 
-function openCommentsView(): boolean {
+async function openCommentsView(): Promise<boolean> {
   if (
     currentView !== "timeline" ||
-    !root ||
     !feed ||
     !commentsFeed ||
-    !footer ||
     !statusText ||
     !connectionMode ||
+    !currentRenderer ||
+    commentsPreparing ||
     loading ||
     loadingMore
   )
     return false
   const tweet = timelineTweets[selectedIndex]
   if (!tweet) return false
+  const renderer = currentRenderer
 
   commentsGeneration += 1
+  const requestGeneration = commentsGeneration
+  commentsPreparing = true
   commentsLoading = false
   commentsCursor = null
   commentsHasMore = true
@@ -1728,15 +1732,30 @@ function openCommentsView(): boolean {
     wrapMode: "word",
   })
   commentsFeed.add(commentsStateText)
+  setCommentsState("LOADING COMMENTS...", COLORS.amber)
 
-  root.remove(feed)
-  root.insertBefore(commentsFeed, footer)
+  // Media sizing needs an attached layout pass; keep that pass behind the timeline.
+  await renderer.idle()
+  if (
+    requestGeneration !== commentsGeneration ||
+    currentRenderer !== renderer ||
+    renderer.isDestroyed ||
+    currentView !== "timeline" ||
+    !connectionMode ||
+    !feed ||
+    !commentsFeed
+  ) {
+    if (requestGeneration === commentsGeneration) commentsPreparing = false
+    return false
+  }
+
+  feed.visible = false
   currentView = "comments"
   updateHeader()
   updateFooter()
   commentsFeed.focus()
-  setCommentsState("LOADING COMMENTS...", COLORS.amber)
   setStatus("Loading direct replies...", COLORS.amber)
+  commentsPreparing = false
   void loadCommentsPage()
   return true
 }
@@ -2833,11 +2852,15 @@ function scheduleCommentsCheck(): void {
   })
 }
 
-function createMainScrollBox(renderer: CliRenderer, id: string): ScrollBoxRenderable {
+function createMainScrollBox(renderer: CliRenderer, id: string, zIndex: number): ScrollBoxRenderable {
   return new ScrollBoxRenderable(renderer, {
     id,
+    position: "absolute",
+    left: 0,
+    top: 0,
     width: "100%",
-    flexGrow: 1,
+    height: "100%",
+    zIndex,
     scrollX: false,
     scrollY: true,
     viewportCulling: true,
@@ -2884,6 +2907,7 @@ export function run(renderer: CliRenderer, options: XDemoRunOptions = {}): void 
   commentsCursor = null
   commentsHasMore = false
   commentsLoading = false
+  commentsPreparing = false
   commentsGeneration += 1
   detectedBrowserOverride = options.detectedBrowsers ? [...options.detectedBrowsers] : null
   xApiBaseUrl = options.xApiBaseUrl?.replace(/\/+$/, "") || X_API_BASE_URL
@@ -2971,8 +2995,17 @@ export function run(renderer: CliRenderer, options: XDemoRunOptions = {}): void 
   })
   statusBar.add(statusText)
 
-  feed = createMainScrollBox(renderer, "x-feed")
-  commentsFeed = createMainScrollBox(renderer, "x-comments-feed")
+  const viewStack = new BoxRenderable(renderer, {
+    id: "x-view-stack",
+    width: "100%",
+    flexGrow: 1,
+    position: "relative",
+    backgroundColor: COLORS.background,
+  })
+  commentsFeed = createMainScrollBox(renderer, "x-comments-feed", 0)
+  feed = createMainScrollBox(renderer, "x-feed", 1)
+  viewStack.add(commentsFeed)
+  viewStack.add(feed)
   loadingMoreIndicator = createLoadingMoreIndicator()
   if (loadingMoreIndicator) feed.viewport.add(loadingMoreIndicator)
   feedScrollListener = loadMoreNearBottom
@@ -2996,7 +3029,7 @@ export function run(renderer: CliRenderer, options: XDemoRunOptions = {}): void 
 
   root.add(header)
   root.add(statusBar)
-  root.add(feed)
+  root.add(viewStack)
   root.add(footer)
   renderer.root.add(root)
   feed.focus()
@@ -3037,6 +3070,7 @@ export function destroy(): void {
   commentsCursor = null
   commentsHasMore = false
   commentsLoading = false
+  commentsPreparing = false
 
   while (keymapDisposers.length > 0) keymapDisposers.pop()?.()
   modalRoutes = []
