@@ -4,12 +4,14 @@ import { spawn } from "node:child_process"
 import {
   BoxRenderable,
   CliRenderEvents,
+  ConsolePosition,
   type CliRenderer,
   ImageError,
   ImageLoadError,
   ImageRenderable,
   InputRenderable,
   InputRenderableEvents,
+  MouseButton,
   ScrollBoxRenderable,
   SelectRenderable,
   SelectRenderableEvents,
@@ -23,6 +25,7 @@ import {
   t,
   underline,
   type KeyEvent,
+  type MouseEvent,
   type Renderable,
   type SelectOption,
   type TextChunk,
@@ -350,8 +353,10 @@ let feed: ScrollBoxRenderable | null = null
 let commentsFeed: ScrollBoxRenderable | null = null
 let statusText: TextRenderable | null = null
 let headerText: TextRenderable | null = null
+let headerHomeText: TextRenderable | null = null
+let headerFollowingText: TextRenderable | null = null
+let headerActionText: TextRenderable | null = null
 let footer: BoxRenderable | null = null
-let footerText: TextRenderable | null = null
 let emptyState: BoxRenderable | null = null
 let authOverlay: BoxRenderable | null = null
 let authInput: InputRenderable | null = null
@@ -372,6 +377,7 @@ let cards: BoxRenderable[] = []
 let timelineTweets: TweetData[] = []
 let timelineTweetIds = new Set<string>()
 let postBodies = new Map<string, TextRenderable>()
+let postToggles = new Map<string, TextRenderable>()
 let expandedPostIds = new Set<string>()
 let selectedIndex = -1
 let loading = false
@@ -401,6 +407,7 @@ let commentsLoading = false
 let commentsGeneration = 0
 let commentsStateText: TextRenderable | null = null
 let commentsScrollListener: (() => void) | null = null
+let resizeListener: (() => void) | null = null
 let twitterClientFactory = (options: ConstructorParameters<typeof TwitterClient>[0]) => new TwitterClient(options)
 let openExternalUrl = launchUrl
 
@@ -747,33 +754,141 @@ function formatCommandKey(command: CommandName): string {
   ).toUpperCase()
 }
 
+function makeClickable(
+  target: Renderable,
+  action: () => void | boolean | Promise<void>,
+  enabled: () => boolean = () => true,
+  preventAutoFocus: boolean = true,
+): void {
+  target.onMouseDown = (event: MouseEvent) => {
+    if (event.button !== MouseButton.LEFT || !enabled()) return
+    event.stopPropagation()
+    if (preventAutoFocus) event.preventDefault()
+    currentRenderer?.setMousePointer("default")
+    const result = action()
+    if (!(result instanceof Promise) && !target.isDestroyed && enabled()) currentRenderer?.setMousePointer("pointer")
+  }
+  target.onMouseOver = () => {
+    if (enabled()) currentRenderer?.setMousePointer("pointer")
+  }
+  target.onMouseOut = () => currentRenderer?.setMousePointer("default")
+}
+
+function clearChildren(container: BoxRenderable): void {
+  for (const child of container.getChildren().toReversed()) child.destroyRecursively()
+}
+
 function updateHeader(): void {
-  if (!headerText) return
+  if (!headerText || !headerHomeText || !headerFollowingText || !headerActionText) return
+  headerText.content = t`${bold(fg(COLORS.primary)("X"))}  `
   if (currentView === "comments") {
     const username = commentsRootTweet?.author.username
-    headerText.content = t`${bold(fg(COLORS.primary)("X"))}  ${underline(bold(fg(COLORS.primary)("COMMENTS")))}  ${fg(COLORS.secondary)(username ? `@${username}` : "")}  ${dim(fg(COLORS.secondary)(`${formatCommandKey("x.comments.back")} BACK · READ-ONLY`))}`
+    headerHomeText.content = t`${underline(bold(fg(COLORS.primary)("COMMENTS")))}  `
+    headerFollowingText.content = t`${fg(COLORS.secondary)(username ? `@${username}` : "")}  `
+    headerActionText.content = t`${dim(fg(COLORS.secondary)(`${formatCommandKey("x.comments.back")} BACK · READ-ONLY`))}`
     return
   }
-  const home =
+  headerHomeText.content =
     currentStream === "home" && connectionMode !== "official"
-      ? underline(bold(fg(COLORS.primary)("HOME")))
-      : fg(COLORS.muted)("HOME")
-  const following =
-    currentStream === "following" ? underline(bold(fg(COLORS.primary)("FOLLOWING"))) : fg(COLORS.muted)("FOLLOWING")
-  headerText.content = t`${bold(fg(COLORS.primary)("X"))}  ${home}  ${following}  ${dim(fg(COLORS.secondary)(`${formatCommandKey("x.feed.switch-stream")} SWITCH · READ-ONLY`))}`
+      ? t`${underline(bold(fg(COLORS.primary)("HOME")))}  `
+      : t`${fg(COLORS.muted)("HOME")}  `
+  headerFollowingText.content =
+    currentStream === "following"
+      ? t`${underline(bold(fg(COLORS.primary)("FOLLOWING")))}  `
+      : t`${fg(COLORS.muted)("FOLLOWING")}  `
+  headerActionText.content = t`${dim(fg(COLORS.secondary)(`${formatCommandKey("x.feed.switch-stream")} SWITCH · READ-ONLY`))}`
+}
+
+function addFooterItem(
+  id: string,
+  key: string,
+  label: string,
+  color: string = COLORS.accent,
+  action?: () => void | boolean | Promise<void>,
+): void {
+  if (!footer) return
+  const item = new TextRenderable(footer.ctx, {
+    id,
+    content: t`${bold(fg(color)(key))} ${fg(COLORS.secondary)(label)}   `,
+    height: 1,
+    wrapMode: "none",
+    selectable: false,
+    flexShrink: 0,
+  })
+  if (action) makeClickable(item, action)
+  footer.add(item)
+}
+
+function addCompactFooterItem(
+  id: string,
+  label: string,
+  action: () => void | boolean | Promise<void>,
+  color: string = COLORS.accent,
+): void {
+  if (!footer) return
+  const item = new TextRenderable(footer.ctx, {
+    id,
+    content: t`${bold(fg(color)(label))} `,
+    height: 1,
+    wrapMode: "none",
+    selectable: false,
+    flexShrink: 0,
+  })
+  makeClickable(item, action)
+  footer.add(item)
 }
 
 function updateFooter(): void {
-  if (!footerText) return
+  if (!footer) return
+  clearChildren(footer)
+  if ((currentRenderer?.width ?? 100) < 82) {
+    if (currentView === "comments") {
+      addCompactFooterItem("x-footer-back", "back", closeCommentsView)
+      addCompactFooterItem("x-footer-logs", "logs", toggleConsole, COLORS.secondary)
+      addCompactFooterItem("x-footer-quit", "quit", quitApplication, COLORS.error)
+    } else {
+      addCompactFooterItem("x-footer-comments", "comments", openCommentsView)
+      addCompactFooterItem(
+        "x-footer-refresh",
+        "refresh",
+        () => {
+          void refreshTimeline()
+        },
+        COLORS.green,
+      )
+      addCompactFooterItem("x-footer-session", "session", openSessionFlowFromFeed, COLORS.amber)
+      addCompactFooterItem("x-footer-logs", "logs", toggleConsole, COLORS.secondary)
+      addCompactFooterItem("x-footer-quit", "quit", quitApplication, COLORS.error)
+    }
+    return
+  }
   const quitKey = formatCommandKey("app.quit")
   if (currentView === "comments") {
     const selectionKeys = `${formatCommandKey("x.comments.next")}/${formatCommandKey("x.comments.previous")}`
-    footerText.content = t`${bold(fg(COLORS.accent)(selectionKeys))} ${fg(COLORS.secondary)("select")}   ${bold(fg(COLORS.accent)(formatCommandKey("x.comments.open")))} ${fg(COLORS.secondary)("open")}   ${bold(fg(COLORS.accent)(formatCommandKey("x.comments.back")))} ${fg(COLORS.secondary)("back")}   ${bold(fg(COLORS.error)(quitKey))} ${fg(COLORS.secondary)("quit")}`
+    addFooterItem("x-footer-comment-select", selectionKeys, "select")
+    addFooterItem("x-footer-comment-open", formatCommandKey("x.comments.open"), "open")
+    addFooterItem("x-footer-back", formatCommandKey("x.comments.back"), "back", COLORS.accent, closeCommentsView)
+    addFooterItem("x-footer-logs", formatCommandKey("app.console"), "logs", COLORS.secondary, toggleConsole)
+    addFooterItem("x-footer-quit", quitKey, "quit", COLORS.error, quitApplication)
     return
   }
 
   const selectionKeys = `${formatCommandKey("x.feed.next")}/${formatCommandKey("x.feed.previous")}`
-  footerText.content = t`${bold(fg(COLORS.accent)(selectionKeys))} ${fg(COLORS.secondary)("select")}   ${bold(fg(COLORS.accent)(formatCommandKey("x.feed.comments")))} ${fg(COLORS.secondary)("comments")}   ${bold(fg(COLORS.accent)(formatCommandKey("x.feed.open")))} ${fg(COLORS.secondary)("open")}   ${bold(fg(COLORS.green)(formatCommandKey("x.feed.refresh")))} ${fg(COLORS.secondary)("refresh")}   ${bold(fg(COLORS.amber)(formatCommandKey("x.session.open")))} ${fg(COLORS.secondary)("session")}   ${bold(fg(COLORS.error)(quitKey))} ${fg(COLORS.secondary)("quit")}`
+  addFooterItem("x-footer-select", selectionKeys, "select")
+  addFooterItem("x-footer-comments", formatCommandKey("x.feed.comments"), "comments", COLORS.accent, openCommentsView)
+  addFooterItem("x-footer-open", formatCommandKey("x.feed.open"), "open")
+  addFooterItem("x-footer-refresh", formatCommandKey("x.feed.refresh"), "refresh", COLORS.green, () => {
+    void refreshTimeline()
+  })
+  addFooterItem(
+    "x-footer-session",
+    formatCommandKey("x.session.open"),
+    "session",
+    COLORS.amber,
+    openSessionFlowFromFeed,
+  )
+  addFooterItem("x-footer-logs", formatCommandKey("app.console"), "logs", COLORS.secondary, toggleConsole)
+  addFooterItem("x-footer-quit", quitKey, "quit", COLORS.error, quitApplication)
 }
 
 function resetPaginationState(): void {
@@ -784,22 +899,28 @@ function resetPaginationState(): void {
   cookieRequestedCount = PAGE_SIZE
 }
 
-function switchTimelineStream(): boolean {
+function setTimelineStream(stream: TimelineStream): boolean {
   if (!connectionMode || loading || loadingMore) return false
   if (connectionMode === "official") {
     currentStream = "following"
     updateHeader()
-    setStatus("The documented X API exposes Following only; For You requires browser-session mode", COLORS.secondary)
+    if (stream === "home")
+      setStatus("The documented X API exposes Following only; For You requires browser-session mode", COLORS.secondary)
     return true
   }
 
-  currentStream = currentStream === "home" ? "following" : "home"
+  if (currentStream === stream) return true
+  currentStream = stream
   updateHeader()
   resetPaginationState()
   nextRefreshAt = 0
   clearFeed()
   void refreshTimeline()
   return true
+}
+
+function switchTimelineStream(): boolean {
+  return setTimelineStream(currentStream === "home" ? "following" : "home")
 }
 
 function postUrl(tweet: TweetData): string | null {
@@ -829,6 +950,53 @@ async function openPost(tweet: TweetData): Promise<void> {
   const url = postUrl(tweet)
   if (!url) throw new Error("The selected post has an invalid X URL.")
   await openExternalUrl(url)
+}
+
+function quitApplication(): void {
+  currentRenderer?.destroy()
+}
+
+function toggleConsole(): void {
+  currentRenderer?.console.toggle()
+}
+
+async function openTimelinePost(): Promise<boolean> {
+  const tweet = timelineTweets[selectedIndex]
+  if (!tweet) return false
+  try {
+    await openPost(tweet)
+    setStatus("Opened the selected post on X", COLORS.green)
+  } catch (error) {
+    setStatus(`Could not open X: ${error instanceof Error ? error.message : String(error)}`, COLORS.error)
+  }
+  return true
+}
+
+async function openSelectedComment(): Promise<boolean> {
+  const tweet = commentTweets[selectedCommentIndex]
+  if (!tweet) return false
+  try {
+    await openPost(tweet)
+    setStatus("Opened the selected comment on X", COLORS.green)
+  } catch (error) {
+    setStatus(`Could not open X: ${error instanceof Error ? error.message : String(error)}`, COLORS.error)
+  }
+  return true
+}
+
+function openSessionFlowFromFeed(): boolean {
+  if (loading || loadingMore) return false
+  client = null
+  connectionMode = null
+  officialToken = null
+  officialUser = null
+  selectedCookieSource = null
+  authMode = null
+  cookieSessionBlocked = false
+  nextRefreshAt = 0
+  setStatus("Waiting for a session...", COLORS.muted)
+  openConnectionFlow(true)
+  return true
 }
 
 function cleanPostText(value: string): string {
@@ -938,25 +1106,26 @@ function postAuthorContent(tweet: TweetData) {
   return t`${bold(fg(COLORS.primary)(tweet.author.name || username))} ${fg(COLORS.secondary)(`@${username}`)} ${fg(COLORS.muted)(timestamp ? `· ${timestamp}` : "")}`
 }
 
-function postBodyContent(tweet: TweetData, expanded: boolean = false, showToggle: boolean = true) {
+function postBodyContent(tweet: TweetData, expanded: boolean = false) {
   const article = tweet.article?.title ? `\nARTICLE · ${tweet.article.title}` : ""
   const preview = postPreview(displayPostText(tweet), expanded)
-  const toggle =
-    showToggle && preview.isLong
-      ? bold(
-          fg(COLORS.amber)(
-            `\n\n[${formatCommandKey("x.feed.toggle-expanded")}] ${expanded ? "Show Less" : "Show More"}`,
-          ),
-        )
-      : null
 
   const chunks = [...styledMentions(preview.text).chunks]
   if (article) chunks.push(bold(fg(COLORS.amber)(article)))
-  if (toggle) chunks.push(toggle)
   return new StyledText(chunks)
 }
 
-function addPostMetrics(card: BoxRenderable, tweet: TweetData, index: number, idPrefix: string = "x-post"): void {
+function postToggleContent(expanded: boolean): StyledText {
+  return t`${bold(fg(COLORS.amber)(`[${formatCommandKey("x.feed.toggle-expanded")}] ${expanded ? "Show Less" : "Show More"}`))}`
+}
+
+function addPostMetrics(
+  card: BoxRenderable,
+  tweet: TweetData,
+  index: number,
+  idPrefix: string = "x-post",
+  onReplies?: () => void | boolean,
+): void {
   const row = new BoxRenderable(card.ctx, {
     id: `${idPrefix}-footer-${index}`,
     width: "100%",
@@ -981,12 +1150,14 @@ function addPostMetrics(card: BoxRenderable, tweet: TweetData, index: number, id
       alignItems: "center",
       justifyContent: metric.align,
     })
+    if (metric.id === "replies" && onReplies) makeClickable(cell, onReplies)
     cell.add(
       new TextRenderable(card.ctx, {
         content: metric.content,
         fg: metric.color,
         height: 1,
         wrapMode: "none",
+        selectable: false,
       }),
     )
     row.add(cell)
@@ -1231,6 +1402,7 @@ function clearFeed(): void {
   timelineTweets = []
   timelineTweetIds.clear()
   postBodies.clear()
+  postToggles.clear()
   expandedPostIds.clear()
   selectedIndex = -1
 
@@ -1314,18 +1486,27 @@ function hideLoadingMoreIndicator(): void {
   if (loadingMoreIndicator && !loadingMoreIndicator.isDestroyed) loadingMoreIndicator.visible = false
 }
 
-function toggleSelectedPostExpansion(): boolean {
-  const tweet = timelineTweets[selectedIndex]
+function togglePostExpansion(index: number): boolean {
+  const tweet = timelineTweets[index]
   if (!tweet || !postPreview(displayPostText(tweet), false).isLong) return false
   const body = postBodies.get(tweet.id)
-  if (!body) return false
+  const toggle = postToggles.get(tweet.id)
+  if (!body || !toggle) return false
 
   const expanded = !expandedPostIds.has(tweet.id)
   if (expanded) expandedPostIds.add(tweet.id)
   else expandedPostIds.delete(tweet.id)
   body.content = postBodyContent(tweet, expanded)
-  queueMicrotask(() => feed?.scrollChildIntoView(`x-post-${tweet.id}`))
+  toggle.content = postToggleContent(expanded)
+  const currentGeneration = generation
+  queueMicrotask(() => {
+    if (currentGeneration === generation && currentView === "timeline") feed?.scrollChildIntoView(`x-post-${tweet.id}`)
+  })
   return true
+}
+
+function toggleSelectedPostExpansion(): boolean {
+  return togglePostExpansion(selectedIndex)
 }
 
 function createPostCard(tweet: TweetData, index: number): BoxRenderable | null {
@@ -1341,6 +1522,7 @@ function createPostCard(tweet: TweetData, index: number): BoxRenderable | null {
     borderColor: COLORS.border,
     flexShrink: 0,
   })
+  makeClickable(card, () => selectPost(index), undefined, false)
   addPostAuthor(card, tweet, index)
   const body = new TextRenderable(feed.ctx, {
     id: `x-post-content-${index}`,
@@ -1351,9 +1533,27 @@ function createPostCard(tweet: TweetData, index: number): BoxRenderable | null {
   })
   postBodies.set(tweet.id, body)
   card.add(body)
+  if (postPreview(displayPostText(tweet), false).isLong) {
+    const toggle = new TextRenderable(feed.ctx, {
+      id: `x-post-toggle-${tweet.id}`,
+      content: postToggleContent(expandedPostIds.has(tweet.id)),
+      marginTop: 1,
+      wrapMode: "none",
+      selectable: false,
+    })
+    makeClickable(toggle, () => {
+      selectPost(index, false)
+      return togglePostExpansion(index)
+    })
+    postToggles.set(tweet.id, toggle)
+    card.add(toggle)
+  }
   addPostMedia(card, tweet, index)
   addQuotedPost(card, tweet, index)
-  addPostMetrics(card, tweet, index)
+  addPostMetrics(card, tweet, index, "x-post", () => {
+    selectPost(index, false)
+    return openCommentsView()
+  })
   return card
 }
 
@@ -1382,7 +1582,7 @@ function createCommentsPostCard(
   card.add(
     new TextRenderable(destination.ctx, {
       id: `${idPrefix}-content-${index}`,
-      content: postBodyContent(tweet, true, false),
+      content: postBodyContent(tweet, true),
       width: "100%",
       wrapMode: "word",
       selectable: true,
@@ -1391,6 +1591,7 @@ function createCommentsPostCard(
   addPostMedia(card, tweet, index, `${idPrefix}-media`)
   addQuotedPost(card, tweet, index, idPrefix)
   addPostMetrics(card, tweet, index, idPrefix)
+  if (!isRoot) makeClickable(card, () => selectComment(index), undefined, false)
   return card
 }
 
@@ -1614,6 +1815,116 @@ function openConnectionFlow(returnToFeed: boolean): void {
   renderModalRoute()
 }
 
+function createHintRow(renderer: CliRenderer, id: string): BoxRenderable {
+  return new BoxRenderable(renderer, {
+    id,
+    width: "100%",
+    marginTop: 1,
+    flexDirection: "row",
+    flexWrap: "wrap",
+    flexShrink: 0,
+  })
+}
+
+function addHintSegment(
+  row: BoxRenderable,
+  id: string,
+  content: StyledText | string,
+  action?: () => void | boolean,
+  flexGrow: number = 0,
+): TextRenderable {
+  const segment = new TextRenderable(row.ctx, {
+    id,
+    content,
+    height: flexGrow > 0 ? "auto" : 1,
+    wrapMode: flexGrow > 0 ? "word" : "none",
+    selectable: false,
+    flexGrow,
+    flexShrink: flexGrow > 0 ? 1 : 0,
+  })
+  if (action) makeClickable(segment, action)
+  row.add(segment)
+  return segment
+}
+
+function addSelectHint(
+  modal: BoxRenderable,
+  renderer: CliRenderer,
+  id: string,
+  confirmLabel: string,
+  backAction?: () => boolean,
+): void {
+  const row = createHintRow(renderer, id)
+  addHintSegment(row, `${id}-choose`, t`${bold(fg(COLORS.accent)("UP/DOWN"))} ${fg(COLORS.secondary)("choose")}   `)
+  addHintSegment(
+    row,
+    `${id}-confirm`,
+    t`${bold(fg(COLORS.green)(formatKeyLabel("return")))} ${fg(COLORS.secondary)(confirmLabel)}   `,
+    () => authSelect?.selectCurrent(),
+  )
+  if (backAction) {
+    addHintSegment(
+      row,
+      `${id}-back`,
+      t`${bold(fg(COLORS.secondary)(formatCommandKey("x.modal.back")))} ${fg(COLORS.secondary)("back")}   `,
+      backAction,
+    )
+  }
+  addHintSegment(
+    row,
+    `${id}-quit`,
+    t`${bold(fg(COLORS.error)(formatCommandKey("app.quit")))} ${fg(COLORS.secondary)("quit")}`,
+    quitApplication,
+  )
+  modal.add(row)
+}
+
+function addInputHint(
+  modal: BoxRenderable,
+  renderer: CliRenderer,
+  id: string,
+  initialStatus: StyledText,
+  submitLabel: string,
+): TextRenderable {
+  const row = createHintRow(renderer, id)
+  const status = addHintSegment(row, `${id}-status`, initialStatus, undefined, 1)
+  addHintSegment(
+    row,
+    `${id}-submit`,
+    t`${bold(fg(COLORS.green)(formatKeyLabel("return")))} ${fg(COLORS.secondary)(submitLabel)}   `,
+    () => authInput?.submit(),
+  )
+  addHintSegment(
+    row,
+    `${id}-back`,
+    t`${bold(fg(COLORS.secondary)(formatCommandKey("x.modal.back")))} ${fg(COLORS.secondary)("back")}   `,
+    popModalRoute,
+  )
+  addHintSegment(
+    row,
+    `${id}-quit`,
+    t`${bold(fg(COLORS.error)(formatCommandKey("app.quit")))} ${fg(COLORS.secondary)("quit")}`,
+    quitApplication,
+  )
+  modal.add(row)
+  return status
+}
+
+function enableSelectMouse(select: SelectRenderable): void {
+  select.onMouseDown = (event: MouseEvent) => {
+    if (event.button !== MouseButton.LEFT) return
+    const index = Math.floor((event.y - select.y) / 2)
+    if (index < 0 || index >= select.options.length) return
+    event.stopPropagation()
+    event.preventDefault()
+    currentRenderer?.setMousePointer("default")
+    select.setSelectedIndex(index)
+    select.selectCurrent()
+  }
+  select.onMouseOver = () => currentRenderer?.setMousePointer("pointer")
+  select.onMouseOut = () => currentRenderer?.setMousePointer("default")
+}
+
 function selectCookieSource(source: CookieSource): void {
   rememberBrowserSource(source.id)
   connectionMode = "cookie"
@@ -1702,19 +2013,15 @@ ${fg(COLORS.secondary)("Choose the browser that contains the X session you want 
     showDescription: true,
     showSelectionIndicator: true,
     wrapSelection: true,
+    itemSpacing: 0,
   })
+  enableSelectMouse(authSelect)
   authSelect.on(SelectRenderableEvents.ITEM_SELECTED, (_index: number, option: SelectOption) => {
     selectCookieSource(option.value as CookieSource)
   })
   selectBox.add(authSelect)
   modal.add(selectBox)
-  modal.add(
-    new TextRenderable(renderer, {
-      content: t`${bold(fg(COLORS.accent)(`${formatKeyLabel("up")}/${formatKeyLabel("down")} or ${formatKeyLabel("j")}/${formatKeyLabel("k")}`))} ${fg(COLORS.secondary)("choose")}   ${bold(fg(COLORS.green)(formatKeyLabel("return")))} ${fg(COLORS.secondary)("continue")}   ${bold(fg(COLORS.secondary)(formatCommandKey("x.modal.back")))} ${fg(COLORS.secondary)("back")}`,
-      marginTop: 1,
-      wrapMode: "word",
-    }),
-  )
+  addSelectHint(modal, renderer, "x-browser-hint", "continue", popModalRoute)
 
   authOverlay.add(modal)
   renderer.root.add(authOverlay)
@@ -1811,21 +2118,16 @@ ${fg(COLORS.muted)("The token is concealed, kept in memory only, and sent only t
     cursorColor: COLORS.green,
     attributes: TextAttributes.HIDDEN,
   })
+  makeClickable(inputBox, () => authInput?.focus(), undefined, false)
   inputBox.add(authInput)
   modal.add(inputBox)
 
-  authHint = new TextRenderable(renderer, {
-    id: "x-official-token-hint",
-    content: t`${fg(COLORS.muted)(`Paste token · ${formatKeyLabel("return")} continue · ${formatCommandKey("x.modal.back")} back`)}`,
-    marginTop: 1,
-    wrapMode: "word",
-  })
-  modal.add(authHint)
+  authHint = addInputHint(modal, renderer, "x-official-token-hint", t`${fg(COLORS.muted)("Paste token")}`, "continue")
   authInput.on(InputRenderableEvents.INPUT, (inputValue: string) => {
     if (!authHint) return
     authHint.content = inputValue
-      ? t`${fg(COLORS.green)(`TOKEN ENTERED · ${inputValue.length} characters · ${formatKeyLabel("return")} continue`)}`
-      : t`${fg(COLORS.muted)(`Paste token · ${formatKeyLabel("return")} continue · ${formatCommandKey("x.modal.back")} back`)}`
+      ? t`${fg(COLORS.green)(`TOKEN · ${inputValue.length} CHARS`)}`
+      : t`${fg(COLORS.muted)("Paste token")}`
   })
   authInput.on(InputRenderableEvents.ENTER, submitOfficialToken)
 
@@ -1898,7 +2200,9 @@ ${fg(COLORS.secondary)("This client is deprecated and may send stale request sha
     selectedDescriptionColor: COLORS.selectedDescription,
     showDescription: true,
     wrapSelection: true,
+    itemSpacing: 0,
   })
+  enableSelectMouse(authSelect)
   authSelect.on(SelectRenderableEvents.ITEM_SELECTED, (_index: number, option: SelectOption) => {
     queueMicrotask(() => {
       if (option.value === "continue") pushModalRoute("cookie-auth")
@@ -1906,13 +2210,7 @@ ${fg(COLORS.secondary)("This client is deprecated and may send stale request sha
     })
   })
   modal.add(authSelect)
-  modal.add(
-    new TextRenderable(renderer, {
-      content: t`${bold(fg(COLORS.accent)(`${formatKeyLabel("up")}/${formatKeyLabel("down")} or ${formatKeyLabel("j")}/${formatKeyLabel("k")}`))} ${fg(COLORS.secondary)("choose")}   ${bold(fg(COLORS.error)(formatKeyLabel("return")))} ${fg(COLORS.secondary)("confirm")}   ${bold(fg(COLORS.secondary)(formatCommandKey("x.modal.back")))} ${fg(COLORS.secondary)("back")}`,
-      marginTop: 1,
-      wrapMode: "word",
-    }),
-  )
+  addSelectHint(modal, renderer, "x-cookie-risk-hint", "confirm", popModalRoute)
   authOverlay.add(modal)
   renderer.root.add(authOverlay)
   authSelect.focus()
@@ -1976,21 +2274,15 @@ ${fg(COLORS.secondary)("The documented API is the default and recommended path."
     selectedDescriptionColor: COLORS.selectedDescription,
     showDescription: true,
     wrapSelection: true,
+    itemSpacing: 0,
   })
+  enableSelectMouse(authSelect)
   authSelect.on(SelectRenderableEvents.ITEM_SELECTED, (_index: number, option: SelectOption) => {
     if (option.value === "official") pushModalRoute("official-token")
     else pushModalRoute("cookie-risk")
   })
   modal.add(authSelect)
-  const leaveKey = modalReturnsToFeed ? formatCommandKey("x.modal.back") : formatCommandKey("app.quit")
-  const leaveAction = modalReturnsToFeed ? "back" : "quit"
-  modal.add(
-    new TextRenderable(renderer, {
-      content: t`${bold(fg(COLORS.accent)(`${formatKeyLabel("up")}/${formatKeyLabel("down")} or ${formatKeyLabel("j")}/${formatKeyLabel("k")}`))} ${fg(COLORS.secondary)("choose")}   ${bold(fg(COLORS.green)(formatKeyLabel("return")))} ${fg(COLORS.secondary)("continue")}   ${bold(fg(COLORS.secondary)(leaveKey))} ${fg(COLORS.secondary)(leaveAction)}`,
-      marginTop: 1,
-      wrapMode: "word",
-    }),
-  )
+  addSelectHint(modal, renderer, "x-connection-hint", "continue", modalReturnsToFeed ? popModalRoute : undefined)
   authOverlay.add(modal)
   renderer.root.add(authOverlay)
   authSelect.focus()
@@ -2110,22 +2402,17 @@ ${fg(COLORS.muted)("The value is concealed, kept in memory only, and never logge
     cursorColor: COLORS.accent,
     attributes: TextAttributes.HIDDEN,
   })
+  makeClickable(inputBox, () => authInput?.focus(), undefined, false)
   inputBox.add(authInput)
   modal.add(inputBox)
 
-  authHint = new TextRenderable(renderer, {
-    id: "x-auth-hint",
-    content: t`${fg(COLORS.muted)(`EMPTY · ${formatKeyLabel("return")} use browser cookies · ${formatCommandKey("x.modal.back")} back`)}`,
-    marginTop: 1,
-    wrapMode: "word",
-  })
-  modal.add(authHint)
+  authHint = addInputHint(modal, renderer, "x-auth-hint", t`${fg(COLORS.muted)("EMPTY")}`, "use browser cookies")
 
   authInput.on(InputRenderableEvents.INPUT, (inputValue: string) => {
     if (!authHint) return
     authHint.content = inputValue
-      ? t`${fg(COLORS.green)(`SESSION ENTERED · ${inputValue.length} characters · ${formatKeyLabel("return")} continue`)}`
-      : t`${fg(COLORS.muted)(`EMPTY · ${formatKeyLabel("return")} use browser cookies · ${formatCommandKey("x.modal.back")} back`)}`
+      ? t`${fg(COLORS.green)(`SESSION · ${inputValue.length} CHARS`)}`
+      : t`${fg(COLORS.muted)("EMPTY")}`
   })
   authInput.on(InputRenderableEvents.ENTER, submitSession)
 
@@ -2162,13 +2449,13 @@ function registerXKeymap(renderer: CliRenderer): Keymap<Renderable, KeyEvent> {
         {
           name: "app.quit",
           run() {
-            renderer.destroy()
+            quitApplication()
           },
         },
         {
           name: "app.console",
           run() {
-            renderer.console.toggle()
+            toggleConsole()
           },
         },
         {
@@ -2185,15 +2472,8 @@ function registerXKeymap(renderer: CliRenderer): Keymap<Renderable, KeyEvent> {
         },
         {
           name: "x.feed.open",
-          async run() {
-            const tweet = timelineTweets[selectedIndex]
-            if (!tweet) return false
-            try {
-              await openPost(tweet)
-              setStatus("Opened the selected post on X", COLORS.green)
-            } catch (error) {
-              setStatus(`Could not open X: ${error instanceof Error ? error.message : String(error)}`, COLORS.error)
-            }
+          run() {
+            return openTimelinePost()
           },
         },
         {
@@ -2240,31 +2520,14 @@ function registerXKeymap(renderer: CliRenderer): Keymap<Renderable, KeyEvent> {
         },
         {
           name: "x.comments.open",
-          async run() {
-            const tweet = commentTweets[selectedCommentIndex]
-            if (!tweet) return false
-            try {
-              await openPost(tweet)
-              setStatus("Opened the selected comment on X", COLORS.green)
-            } catch (error) {
-              setStatus(`Could not open X: ${error instanceof Error ? error.message : String(error)}`, COLORS.error)
-            }
+          run() {
+            return openSelectedComment()
           },
         },
         {
           name: "x.session.open",
           run() {
-            if (loading) return false
-            client = null
-            connectionMode = null
-            officialToken = null
-            officialUser = null
-            selectedCookieSource = null
-            authMode = null
-            cookieSessionBlocked = false
-            nextRefreshAt = 0
-            setStatus("Waiting for a session...", COLORS.muted)
-            openConnectionFlow(true)
+            return openSessionFlowFromFeed()
           },
         },
       ],
@@ -2647,6 +2910,7 @@ export function run(renderer: CliRenderer, options: XDemoRunOptions = {}): void 
     width: "100%",
     height: 1,
     flexShrink: 0,
+    flexDirection: "row",
     backgroundColor: COLORS.panel,
   })
   headerText = new TextRenderable(renderer, {
@@ -2654,8 +2918,48 @@ export function run(renderer: CliRenderer, options: XDemoRunOptions = {}): void 
     content: "",
     height: 1,
     wrapMode: "none",
+    selectable: false,
+    flexShrink: 0,
   })
+  headerHomeText = new TextRenderable(renderer, {
+    id: "x-header-home",
+    content: "",
+    height: 1,
+    wrapMode: "none",
+    selectable: false,
+    flexShrink: 0,
+  })
+  headerFollowingText = new TextRenderable(renderer, {
+    id: "x-header-following",
+    content: "",
+    height: 1,
+    wrapMode: "none",
+    selectable: false,
+    flexShrink: 0,
+  })
+  headerActionText = new TextRenderable(renderer, {
+    id: "x-header-action",
+    content: "",
+    height: 1,
+    wrapMode: "none",
+    selectable: false,
+    flexShrink: 0,
+  })
+  makeClickable(
+    headerHomeText,
+    () => setTimelineStream("home"),
+    () => currentView === "timeline",
+  )
+  makeClickable(
+    headerFollowingText,
+    () => setTimelineStream("following"),
+    () => currentView === "timeline",
+  )
+  makeClickable(headerActionText, closeCommentsView, () => currentView === "comments")
   header.add(headerText)
+  header.add(headerHomeText)
+  header.add(headerFollowingText)
+  header.add(headerActionText)
 
   const statusBar = new BoxRenderable(renderer, {
     id: "x-status-bar",
@@ -2688,15 +2992,12 @@ export function run(renderer: CliRenderer, options: XDemoRunOptions = {}): void 
     width: "100%",
     height: 1,
     flexShrink: 0,
+    flexDirection: "row",
     backgroundColor: COLORS.panel,
   })
-  footerText = new TextRenderable(renderer, {
-    content: "",
-    height: 1,
-    wrapMode: "none",
-  })
-  footer.add(footerText)
   updateFooter()
+  resizeListener = updateFooter
+  renderer.on(CliRenderEvents.RESIZE, resizeListener)
 
   root.add(header)
   root.add(statusBar)
@@ -2750,8 +3051,10 @@ export function destroy(): void {
   hideLoadingMoreIndicator()
   if (feedScrollListener && feed) feed.verticalScrollBar.off("change", feedScrollListener)
   if (commentsScrollListener && commentsFeed) commentsFeed.verticalScrollBar.off("change", commentsScrollListener)
+  if (resizeListener && currentRenderer) currentRenderer.off(CliRenderEvents.RESIZE, resizeListener)
   feedScrollListener = null
   commentsScrollListener = null
+  resizeListener = null
   feed?.destroyRecursively()
   commentsFeed?.destroyRecursively()
   root?.destroyRecursively()
@@ -2762,13 +3065,16 @@ export function destroy(): void {
   commentsFeed = null
   statusText = null
   headerText = null
+  headerHomeText = null
+  headerFollowingText = null
+  headerActionText = null
   footer = null
-  footerText = null
   emptyState = null
   cards = []
   timelineTweets = []
   timelineTweetIds.clear()
   postBodies.clear()
+  postToggles.clear()
   expandedPostIds.clear()
   commentCards = []
   commentTweets = []
@@ -2782,6 +3088,7 @@ if (import.meta.main) {
   const renderer = await createCliRenderer({
     exitOnCtrlC: false,
     targetFps: 30,
+    consoleOptions: { position: ConsolePosition.TOP },
   })
   try {
     run(renderer)

@@ -11,7 +11,7 @@ A compact, keyboard-driven X client built with [OpenTUI](https://opentui.com). I
 - Native Kitty, Sixel, and terminal-block image rendering
 - Quoted posts, profile images, mention highlighting, and long-post expansion
 - Paginated direct comments with exact return to the previous timeline position
-- Fully keyboard-driven navigation through `@opentui/keymap`
+- Keyboard-first navigation with mouse support for visible controls
 
 ## Requirements
 
@@ -65,6 +65,8 @@ After you choose a browser, xtui remembers only that browser's ID and tries its 
 | `Escape`      | Return from comments or nested setup views |
 | `` ` ``       | Toggle OpenTUI's captured console/log view |
 | `Ctrl+C`      | Quit                                       |
+
+With a mouse, click posts or comments to select them, click visible action labels and Show More/Less links, and use the wheel or scrollbar to scroll. Opening a selected post or comment on x.com remains keyboard-only with `O`.
 
 Image failures are logged to OpenTUI's console with sanitized URLs, post/media context, error code, HTTP status, cause, and stack. Press backtick to inspect them.
 

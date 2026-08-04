@@ -2,13 +2,14 @@ import { describe, expect, test } from "bun:test"
 import {
   BoxRenderable,
   CliRenderEvents,
+  ConsolePosition,
   ScrollBoxRenderable,
   TextAttributes,
   type CliRendererErrorEvent,
   type CliRendererHandlerErrorEvent,
   type Renderable,
 } from "@opentui/core"
-import { createTestRenderer, type TestRendererSetup } from "@opentui/core/testing"
+import { createTestRenderer, MouseButtons, type TestRendererSetup } from "@opentui/core/testing"
 import { TwitterClient, type TweetData } from "@steipete/bird"
 import { mkdtempSync, rmSync } from "node:fs"
 import { join } from "node:path"
@@ -207,7 +208,7 @@ interface AppHarness {
   close(): Promise<void>
 }
 
-async function createApp(height: number = 30, options: XDemoRunOptions = {}): Promise<AppHarness> {
+async function createApp(height: number = 30, options: XDemoRunOptions = {}, width: number = 100): Promise<AppHarness> {
   const configHome = mkdtempSync(join(process.cwd(), ".xtui-app-test-"))
   const originalAppData = process.env.APPDATA
   const originalXdgConfigHome = process.env.XDG_CONFIG_HOME
@@ -224,7 +225,14 @@ async function createApp(height: number = 30, options: XDemoRunOptions = {}): Pr
   let setup: TestRendererSetup | null = null
   try {
     api = new XApiServer()
-    setup = await createTestRenderer({ width: 100, height, kittyKeyboard: true, exitOnCtrlC: false })
+    setup = await createTestRenderer({
+      width,
+      height,
+      kittyKeyboard: true,
+      exitOnCtrlC: false,
+      consoleMode: "console-overlay",
+      consoleOptions: { position: ConsolePosition.TOP },
+    })
     const rendererErrors: unknown[] = []
     const unhandled: unknown[] = []
     const onRenderError = (event: CliRendererErrorEvent) => rendererErrors.push(event.error)
@@ -301,6 +309,45 @@ function getScrollBox(app: AppHarness, id: string): ScrollBoxRenderable {
   return scrollBox as ScrollBoxRenderable
 }
 
+async function clickRenderable(app: AppHarness, id: string, clipId?: string): Promise<void> {
+  await app.setup.renderOnce()
+  const target = app.setup.renderer.root.findDescendantById(id)
+  expect(target).toBeDefined()
+  const clip = clipId ? app.setup.renderer.root.findDescendantById(clipId) : undefined
+  if (clipId) expect(clip).toBeDefined()
+  const left = Math.max(target!.screenX, clip?.screenX ?? target!.screenX)
+  const top = Math.max(target!.screenY, clip?.screenY ?? target!.screenY)
+  const right = Math.min(
+    target!.screenX + target!.width,
+    clip ? clip.screenX + clip.width : target!.screenX + target!.width,
+  )
+  const bottom = Math.min(
+    target!.screenY + target!.height,
+    clip ? clip.screenY + clip.height : target!.screenY + target!.height,
+  )
+  expect(right).toBeGreaterThan(left)
+  expect(bottom).toBeGreaterThan(top)
+  await app.setup.mockMouse.click(
+    Math.floor((left + right - 1) / 2),
+    Math.floor((top + bottom - 1) / 2),
+    MouseButtons.LEFT,
+    {
+      delayMs: 0,
+    },
+  )
+  await Bun.sleep(0)
+  if (!app.setup.renderer.isDestroyed) await app.setup.renderOnce()
+}
+
+async function clickSelectOption(app: AppHarness, id: string, index: number): Promise<void> {
+  await app.setup.renderOnce()
+  const select = app.setup.renderer.root.findDescendantById(id)
+  expect(select).toBeDefined()
+  await app.setup.mockMouse.click(select!.screenX + 1, select!.screenY + index * 2, MouseButtons.LEFT, { delayMs: 0 })
+  await Bun.sleep(0)
+  if (!app.setup.renderer.isDestroyed) await app.setup.renderOnce()
+}
+
 function countPostCards(renderable: Renderable): number {
   let count = /^x-post-\d+$/.test(renderable.id) ? 1 : 0
   for (const child of renderable.getChildren()) {
@@ -334,6 +381,69 @@ describe("xtui application", () => {
 
       app.setup.mockInput.pressCtrlC()
       expect(app.setup.renderer.isDestroyed).toBe(true)
+      app.api.assertDone()
+      expectHealthy(app)
+    } finally {
+      await app.close()
+    }
+  })
+
+  test("supports mouse selection and submission in the official connection flow", async () => {
+    const app = await createApp(24)
+    app.api.expectUser("mouse-token", {
+      body: { data: { id: "42", name: "Mouse User", username: "mouse_user" } },
+    })
+    app.api.expectTimeline("mouse-token", "42", {
+      body: { data: [{ id: "7001", text: "Mouse authenticated timeline" }], meta: {} },
+    })
+
+    try {
+      await app.setup.waitForFrame((frame) => frame.includes("CONNECT X"))
+      await clickSelectOption(app, "x-connection-select", 0)
+      await app.setup.waitForFrame((frame) => frame.includes("OFFICIAL X API"))
+      expect(app.setup.renderer.currentFocusedRenderable?.id).toBe("x-official-token-input")
+
+      await clickRenderable(app, "x-official-token-input-box")
+      await app.setup.mockInput.typeText("mouse-token")
+      await app.setup.waitForFrame((frame) => frame.includes("TOKEN · 11 CHARS"))
+      await clickRenderable(app, "x-official-token-hint-submit")
+      const frame = await waitForApiFrame(app, 2, (value) => value.includes("Mouse authenticated timeline"))
+      expect(frame).toContain("1 Following posts · X API v2 · read-only")
+      expect(app.setup.renderer.currentFocusedRenderable?.id).toBe("x-feed")
+
+      app.api.assertDone()
+      expectHealthy(app)
+    } finally {
+      await app.close()
+    }
+  })
+
+  test("keeps modal actions and mouse controls visible in a narrow terminal", async () => {
+    const app = await createApp(24, {}, 40)
+    app.api.expectUser("narrow-token", {
+      body: { data: { id: "42", name: "Narrow User", username: "narrow_user" } },
+    })
+    app.api.expectTimeline("narrow-token", "42", {
+      body: { data: [{ id: "7201", text: "Narrow timeline" }], meta: {} },
+    })
+
+    try {
+      await app.setup.waitForFrame((frame) => frame.includes("CONNECT X"))
+      await clickSelectOption(app, "x-connection-select", 0)
+      await app.setup.waitForFrame((frame) => frame.includes("OFFICIAL X API"))
+      await clickRenderable(app, "x-official-token-hint-submit")
+      const errorFrame = await app.setup.waitForFrame((frame) => frame.includes("TOKEN") && frame.includes("REQUIRED"))
+      expect(errorFrame).toContain("back")
+      expect(errorFrame).toContain("quit")
+
+      await app.setup.mockInput.typeText("narrow-token")
+      await clickRenderable(app, "x-official-token-hint-submit")
+      const timelineFrame = await waitForApiFrame(app, 2, (frame) => frame.includes("Narrow timeline"))
+      expect(timelineFrame).toContain("comments refresh session logs quit")
+      const quit = app.setup.renderer.root.findDescendantById("x-footer-quit")
+      expect(quit).toBeDefined()
+      expect(quit!.screenX + quit!.width).toBeLessThanOrEqual(40)
+
       app.api.assertDone()
       expectHealthy(app)
     } finally {
@@ -393,7 +503,7 @@ describe("xtui application", () => {
       expect(app.api.requests).toHaveLength(0)
 
       await app.setup.mockInput.typeText("Bearer test-token")
-      await app.setup.waitForFrame((frame) => frame.includes("TOKEN ENTERED · 17 characters"))
+      await app.setup.waitForFrame((frame) => frame.includes("TOKEN · 17 CHARS"))
       const tokenSpan = app.setup
         .captureSpans()
         .lines.flatMap((line) => line.spans)
@@ -479,6 +589,82 @@ describe("xtui application", () => {
     }
   })
 
+  test("supports mouse actions across the timeline and comments views", async () => {
+    const openedUrls: string[] = []
+    const app = await createApp(36, {
+      async openUrl(url) {
+        openedUrls.push(url)
+      },
+    })
+    app.api.expectUser("mouse-actions-token", {
+      body: { data: { id: "42", name: "Reader", username: "reader" } },
+    })
+    app.api.expectTimeline("mouse-actions-token", "42", {
+      body: {
+        data: [
+          { id: "7101", text: "First mouse post" },
+          { id: "7102", text: `${"b".repeat(280)}TAIL` },
+        ],
+        meta: {},
+      },
+    })
+    app.api.expectComments("mouse-actions-token", "7102", { body: { data: [], meta: {} } })
+
+    try {
+      await app.setup.waitForFrame((frame) => frame.includes("CONNECT X"))
+      await loginOfficial(app, "mouse-actions-token")
+      await waitForApiFrame(app, 2, (frame) => frame.includes("First mouse post"))
+
+      await clickRenderable(app, "x-post-7102")
+      expect(openedUrls).toEqual([])
+      expect(getCard(app, "7101").backgroundColor.toInts()).toEqual([8, 8, 8, 255])
+      expect(getCard(app, "7102").backgroundColor.toInts()).toEqual([22, 24, 28, 255])
+      await clickRenderable(app, "x-footer-open")
+      expect(openedUrls).toEqual([])
+
+      await clickRenderable(app, "x-post-toggle-7102")
+      expect(openedUrls).toEqual([])
+      const expanded = await app.setup.waitForFrame((frame) => frame.includes("TAIL"))
+      expect(expanded).toContain("[E] Show Less")
+
+      await clickRenderable(app, "x-header-home")
+      await app.setup.waitForFrame((frame) => frame.includes("The documented X API exposes Following only"))
+      expect(app.api.requests).toHaveLength(2)
+
+      await clickRenderable(app, "x-footer-refresh")
+      await app.setup.waitForFrame((frame) => frame.includes("Refresh cooldown"))
+      expect(app.api.requests).toHaveLength(2)
+
+      await clickRenderable(app, "x-post-replies-1")
+      const commentsFrame = await waitForApiFrame(app, 3, (frame) => frame.includes("NO RECENT DIRECT REPLIES FOUND"))
+      expect(commentsFrame).toContain("SELECTED POST")
+      expect(app.setup.renderer.currentFocusedRenderable?.id).toBe("x-comments-feed")
+
+      await clickRenderable(app, "x-header-action")
+      await app.setup.waitForFrame((frame) => frame.includes("First mouse post") && !frame.includes("SELECTED POST"))
+      expect(app.setup.renderer.currentFocusedRenderable?.id).toBe("x-feed")
+      expect(getCard(app, "7102").backgroundColor.toInts()).toEqual([22, 24, 28, 255])
+
+      await clickRenderable(app, "x-footer-session")
+      await app.setup.waitForFrame((frame) => frame.includes("CONNECT X"))
+      expect(app.setup.renderer.currentFocusedRenderable?.id).toBe("x-connection-select")
+      await clickRenderable(app, "x-connection-hint-back")
+      await app.setup.waitForFrame((frame) => frame.includes("First mouse post") && !frame.includes("CONNECT X"))
+
+      await clickRenderable(app, "x-footer-logs")
+      expect(app.setup.renderer.console.visible).toBe(true)
+      await clickRenderable(app, "x-footer-logs")
+      expect(app.setup.renderer.console.visible).toBe(false)
+
+      app.api.assertDone()
+      expectHealthy(app)
+      await clickRenderable(app, "x-footer-quit")
+      expect(app.setup.renderer.isDestroyed).toBe(true)
+    } finally {
+      await app.close()
+    }
+  })
+
   test("paginates near the end, deduplicates posts, and stops at the final page", async () => {
     const app = await createApp(12)
     const pageRequested = deferred<void>()
@@ -530,6 +716,55 @@ describe("xtui application", () => {
       expectHealthy(app)
     } finally {
       releasePage.resolve()
+      await app.close()
+    }
+  })
+
+  test("scrolls the timeline with the mouse without changing selection", async () => {
+    const app = await createApp(12)
+    app.api.expectUser("mouse-scroll-token", {
+      body: { data: { id: "42", name: "Reader", username: "reader" } },
+    })
+    app.api.expectTimeline("mouse-scroll-token", "42", {
+      body: { data: posts(1, 20), meta: { next_token: "mouse-next" } },
+    })
+    app.api.expectTimeline(
+      "mouse-scroll-token",
+      "42",
+      { body: { data: [{ id: "21", text: "Post 21" }], meta: {} } },
+      "mouse-next",
+    )
+
+    try {
+      await app.setup.waitForFrame((frame) => frame.includes("CONNECT X"))
+      await loginOfficial(app, "mouse-scroll-token")
+      await waitForApiFrame(app, 2, (frame) => frame.includes("Post 1"))
+      const feed = getScrollBox(app, "x-feed")
+      const x = feed.viewport.screenX + Math.floor(feed.viewport.width / 2)
+      const y = feed.viewport.screenY + Math.floor(feed.viewport.height / 2)
+      const initialScrollTop = feed.scrollTop
+
+      for (let index = 0; index < 50 && app.api.requests.length < 3; index += 1) {
+        await app.setup.mockMouse.scroll(x, y, "down")
+        await app.setup.renderOnce()
+      }
+      expect(feed.scrollTop).toBeGreaterThan(initialScrollTop)
+      expect(getCard(app, "1").backgroundColor.toInts()).toEqual([22, 24, 28, 255])
+      await waitForApiFrame(app, 3, (frame) => frame.includes("21 posts · end of timeline"))
+      expect(app.setup.renderer.root.findDescendantById("x-post-21")).toBeDefined()
+      const scrolledTop = feed.scrollTop
+
+      for (let index = 0; index < 3; index += 1) {
+        await app.setup.mockMouse.scroll(x, y, "up")
+        await app.setup.renderOnce()
+      }
+      expect(feed.scrollTop).toBeLessThan(scrolledTop)
+      expect(getCard(app, "1").backgroundColor.toInts()).toEqual([22, 24, 28, 255])
+      expect(app.api.requests).toHaveLength(3)
+
+      app.api.assertDone()
+      expectHealthy(app)
+    } finally {
       await app.close()
     }
   })
@@ -619,8 +854,7 @@ describe("xtui application", () => {
       expect(firstCommentCard.backgroundColor.toInts()).toEqual([22, 24, 28, 255])
       expect(secondCommentCard.backgroundColor.toInts()).toEqual([8, 8, 8, 255])
 
-      app.setup.mockInput.pressKey("j")
-      await app.setup.renderOnce()
+      await clickRenderable(app, "x-comment-102")
       expect(firstCommentCard.backgroundColor.toInts()).toEqual([8, 8, 8, 255])
       expect(secondCommentCard.backgroundColor.toInts()).toEqual([22, 24, 28, 255])
       app.setup.mockInput.pressKey("o")
@@ -629,7 +863,7 @@ describe("xtui application", () => {
       app.setup.mockInput.pressKey("k")
       expect(firstCommentCard.backgroundColor.toInts()).toEqual([22, 24, 28, 255])
 
-      app.setup.mockInput.pressEscape()
+      await clickRenderable(app, "x-footer-back")
       const restoredFrame = await app.setup.waitForFrame(
         (frame) => frame.includes("Post 11") && !frame.includes("SELECTED POST"),
       )
@@ -675,13 +909,17 @@ describe("xtui application", () => {
       inReplyToStatusId: "601",
     }
     const repliesCalls: Array<{ tweetId: string; options: Record<string, unknown> }> = []
+    let homeCalls = 0
+    let followingCalls = 0
     let clientOptions: ConstructorParameters<typeof TwitterClient>[0] | null = null
     const fakeClient = {
       async getHomeTimeline() {
+        homeCalls += 1
         return { tweets: [timelineTweet] }
       },
       async getHomeLatestTimeline() {
-        return { tweets: [timelineTweet] }
+        followingCalls += 1
+        return { tweets: [{ ...timelineTweet, text: "Browser following post" }] }
       },
       async getRepliesPaged(tweetId: string, options: Record<string, unknown>) {
         repliesCalls.push({ tweetId, options })
@@ -699,19 +937,26 @@ describe("xtui application", () => {
 
     try {
       await app.setup.waitForFrame((frame) => frame.includes("CONNECT X"))
-      app.setup.mockInput.pressArrow("down")
-      app.setup.mockInput.pressEnter()
+      await clickSelectOption(app, "x-connection-select", 1)
       await app.setup.waitForFrame((frame) => frame.includes("ACCOUNT RISK"))
-      app.setup.mockInput.pressEnter()
+      await clickSelectOption(app, "x-cookie-risk-select", 1)
       await app.setup.waitForFrame((frame) => frame.includes("Use a session token or your browser login"))
+      await clickRenderable(app, "x-auth-input-box")
       await app.setup.mockInput.typeText("auth_token=test-auth; ct0=test-csrf")
-      app.setup.mockInput.pressEnter()
+      await clickRenderable(app, "x-auth-hint-submit")
       const timelineFrame = await app.setup.waitForFrame((frame) => frame.includes("Browser timeline post"))
       expect(timelineFrame).toContain("unofficial cookie mode")
       expect(clientOptions?.cookies.authToken).toBe("test-auth")
       expect(clientOptions?.cookies.ct0).toBe("test-csrf")
 
-      app.setup.mockInput.pressKey("c")
+      await clickRenderable(app, "x-header-following")
+      await app.setup.waitForFrame((frame) => frame.includes("Browser following post"))
+      expect(followingCalls).toBe(1)
+      await clickRenderable(app, "x-header-home")
+      await app.setup.waitForFrame((frame) => frame.includes("Browser timeline post"))
+      expect(homeCalls).toBe(2)
+
+      await clickRenderable(app, "x-footer-comments")
       for (let attempt = 0; attempt < 20 && repliesCalls.length < 2; attempt += 1) {
         await new Promise<void>((resolve) => setImmediate(resolve))
         getScrollBox(app, "x-comments-feed").scrollTo(100_000)
