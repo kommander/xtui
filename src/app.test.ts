@@ -16,7 +16,7 @@ import { TwitterClient, type TweetData } from "@steipete/bird"
 import { mkdtempSync, rmSync } from "node:fs"
 import { join } from "node:path"
 import { DEFAULT_KEYBINDINGS } from "./config.js"
-import { destroy, run, type XDemoRunOptions } from "./index.js"
+import { destroy, run, type XtooeyRunOptions } from "./index.js"
 
 const TIMELINE_QUERY = {
   max_results: "20",
@@ -190,7 +190,7 @@ class XApiServer {
     const expectedHeaders = {
       accept: "application/json",
       authorization: `Bearer ${expected.token}`,
-      "user-agent": "OpenTUI-X-Demo/1.0",
+      "user-agent": "xtooey/0.1.0",
     }
     for (const [name, value] of Object.entries(expectedHeaders)) {
       if (request.headers.get(name) !== value) {
@@ -216,8 +216,12 @@ interface AppHarness {
   close(): Promise<void>
 }
 
-async function createApp(height: number = 30, options: XDemoRunOptions = {}, width: number = 100): Promise<AppHarness> {
-  const configHome = mkdtempSync(join(process.cwd(), ".xtui-app-test-"))
+async function createApp(
+  height: number = 30,
+  options: XtooeyRunOptions = {},
+  width: number = 100,
+): Promise<AppHarness> {
+  const configHome = mkdtempSync(join(process.cwd(), ".xtooey-app-test-"))
   const originalAppData = process.env.APPDATA
   const originalXdgConfigHome = process.env.XDG_CONFIG_HOME
   const restoreEnvironment = () => {
@@ -389,7 +393,7 @@ function posts(start: number, count: number): Array<{ id: string; text: string }
   return Array.from({ length: count }, (_, index) => ({ id: String(start + index), text: `Post ${start + index}` }))
 }
 
-describe("xtui application", () => {
+describe("xtooey application", () => {
   test("uses Ctrl+C as the only exit key", async () => {
     const app = await createApp(18)
 
@@ -1174,7 +1178,7 @@ describe("xtui application", () => {
       expect(firstFrame).toContain("↩ 7   ♥ 9   ↻ 5")
       expect(firstFrame).not.toContain("FOLLOWING  TAB SWITCH")
       const overlay = app.setup.renderer.root.findDescendantById("x-image-view")
-      const appRoot = app.setup.renderer.root.findDescendantById("x-demo-root")
+      const appRoot = app.setup.renderer.root.findDescendantById("xtooey-root")
       const image = getImage(app, "x-image-view-image")
       const viewport = app.setup.renderer.root.findDescendantById("x-image-viewport")!
       const metrics = app.setup.renderer.root.findDescendantById("x-image-view-metrics") as TextRenderable

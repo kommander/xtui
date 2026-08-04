@@ -35,7 +35,6 @@ import { commandBindings, formatCommandBindings } from "@opentui/keymap/extras"
 import { createDefaultOpenTuiKeymap } from "@opentui/keymap/opentui"
 import { TwitterClient, type TweetData, type TwitterCookies } from "@steipete/bird"
 import { mapTweetResult } from "@steipete/bird/dist/lib/twitter-client-utils.js"
-import { SpinnerRenderable } from "opentui-spinner"
 import {
   ALL_PROFILES,
   getCookies,
@@ -47,6 +46,7 @@ import {
 import { existsSync, readdirSync } from "node:fs"
 import { homedir } from "node:os"
 import { isAbsolute, join } from "node:path"
+import packageJson from "../package.json" with { type: "json" }
 import { loadRememberedBrowserSource, rememberBrowserSource, type BrowserSourceId } from "./browser-preference.js"
 import {
   DEFAULT_CONFIG,
@@ -54,8 +54,8 @@ import {
   formatConfigIssue,
   loadConfig,
   type ConfigIssue,
-  type XtuiCommandName,
-  type XtuiConfig,
+  type XtooeyCommandName,
+  type XtooeyConfig,
 } from "./config.js"
 
 export type { BrowserSourceId } from "./browser-preference.js"
@@ -80,6 +80,8 @@ const COLORS = {
   amber: "#FFD400",
   error: "#F4212E",
 } as const
+const APP_NAME = packageJson.name
+const APP_VERSION = packageJson.version
 
 const PAGE_SIZE = 20
 const OFFICIAL_REFRESH_COOLDOWN_MS = 15_000
@@ -97,6 +99,7 @@ const IMAGE_CHROME_ROWS = 1
 const POST_PREVIEW_GRAPHEMES = 280
 const X_API_BASE_URL = "https://api.x.com"
 const COMMENTS_PAGE_SIZE = 100
+const ACTIVITY_SPINNER_FRAMES = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"] as const
 const FEED_COMMANDS = [
   "x.feed.next",
   "x.feed.previous",
@@ -107,14 +110,14 @@ const FEED_COMMANDS = [
   "x.feed.toggle-expanded",
   "x.feed.switch-stream",
   "x.session.open",
-] as const satisfies readonly XtuiCommandName[]
+] as const satisfies readonly XtooeyCommandName[]
 const COMMENTS_COMMANDS = [
   "x.comments.next",
   "x.comments.previous",
   "x.comments.open",
   "x.comments.image",
   "x.comments.back",
-] as const satisfies readonly XtuiCommandName[]
+] as const satisfies readonly XtooeyCommandName[]
 const IMAGE_COMMANDS = [
   "x.image.next",
   "x.image.previous",
@@ -125,8 +128,8 @@ const IMAGE_COMMANDS = [
   "x.image.pan-up",
   "x.image.pan-right",
   "x.image.close",
-] as const satisfies readonly XtuiCommandName[]
-const APP_COMMANDS = ["app.quit", "app.console"] as const satisfies readonly XtuiCommandName[]
+] as const satisfies readonly XtooeyCommandName[]
+const APP_COMMANDS = ["app.quit", "app.console"] as const satisfies readonly XtooeyCommandName[]
 
 const COMMAND_DETAILS = {
   "x.feed.next": { title: "Next post", category: "Timeline", order: 10 },
@@ -156,7 +159,7 @@ const COMMAND_DETAILS = {
   "app.bindings": { title: "Show bindings", category: "Application", order: 50 },
   "app.console": { title: "Toggle logs", category: "Application", order: 51 },
   "app.quit": { title: "Quit", category: "Application", order: 52 },
-} as const satisfies Record<XtuiCommandName, { title: string; category: string; order: number }>
+} as const satisfies Record<XtooeyCommandName, { title: string; category: string; order: number }>
 
 interface CookieSource {
   id: BrowserSourceId
@@ -167,12 +170,12 @@ interface CookieSource {
   configure(options: GetCookiesOptions): void
 }
 
-export interface XDemoRunOptions {
+export interface XtooeyRunOptions {
   detectedBrowsers?: BrowserSourceId[]
   xApiBaseUrl?: string
   twitterClientFactory?: (options: ConstructorParameters<typeof TwitterClient>[0]) => TwitterClient
   openUrl?: (url: string) => Promise<void>
-  config?: XtuiConfig
+  config?: XtooeyConfig
   configPath?: string
 }
 
@@ -523,7 +526,7 @@ const rendererKeymaps = new WeakMap<CliRenderer, Keymap<Renderable, KeyEvent>>()
 
 let root: BoxRenderable | null = null
 let currentRenderer: CliRenderer | null = null
-let activeConfig: XtuiConfig = DEFAULT_CONFIG
+let activeConfig: XtooeyConfig = DEFAULT_CONFIG
 let feed: ScrollBoxRenderable | null = null
 let commentsFeed: ScrollBoxRenderable | null = null
 let statusText: TextRenderable | null = null
@@ -533,8 +536,10 @@ let headerFollowingText: TextRenderable | null = null
 let headerActionText: TextRenderable | null = null
 let footer: BoxRenderable | null = null
 let activityRow: BoxRenderable | null = null
-let activitySpinner: SpinnerRenderable | null = null
+let activitySpinner: TextRenderable | null = null
 let activityLabel: TextRenderable | null = null
+let activitySpinnerTimer: ReturnType<typeof setInterval> | null = null
+let activitySpinnerFrame = 0
 let authOverlay: BoxRenderable | null = null
 let authInput: InputRenderable | null = null
 let authSelect: SelectRenderable | null = null
@@ -719,7 +724,7 @@ async function fetchXApi<T>(path: string, token: string): Promise<{ data: XApiRe
       headers: {
         accept: "application/json",
         authorization: `Bearer ${token}`,
-        "user-agent": "OpenTUI-X-Demo/1.0",
+        "user-agent": `${APP_NAME}/${APP_VERSION}`,
       },
       signal: controller.signal,
     })
@@ -986,7 +991,7 @@ function formatKeyLabel(key: string): string {
   return (activeKeymap?.formatKey(key, { preferDisplay: true }) ?? key).toUpperCase()
 }
 
-function formatCommandKey(command: XtuiCommandName): string {
+function formatCommandKey(command: XtooeyCommandName): string {
   const bindings = activeKeymap?.getCommandBindings({ visibility: "registered", commands: [command] }).get(command)
   return (
     formatCommandBindings(bindings, {
@@ -1124,6 +1129,22 @@ function updateActivityRow(): void {
   activityRow.visible = current !== undefined
   activitySpinner.visible = current !== undefined
   activityLabel.content = current ? `${current.label}${active.length > 1 ? ` · ${active.length} operations` : ""}` : ""
+  if (current && activitySpinnerTimer === null) {
+    activitySpinnerFrame = 0
+    activitySpinner.content = ACTIVITY_SPINNER_FRAMES[activitySpinnerFrame]!
+    activitySpinnerTimer = setInterval(() => {
+      if (!activitySpinner || activitySpinner.isDestroyed) return stopActivitySpinner()
+      activitySpinnerFrame = (activitySpinnerFrame + 1) % ACTIVITY_SPINNER_FRAMES.length
+      activitySpinner.content = ACTIVITY_SPINNER_FRAMES[activitySpinnerFrame]!
+    }, 80)
+    activitySpinnerTimer.unref()
+  } else if (!current) stopActivitySpinner()
+}
+
+function stopActivitySpinner(): void {
+  if (activitySpinnerTimer === null) return
+  clearInterval(activitySpinnerTimer)
+  activitySpinnerTimer = null
 }
 
 function beginLoadingActivity(label: string, priority: number): LoadingActivityHandle {
@@ -1483,7 +1504,7 @@ function reportImageFailure(context: ImageFailureContext, error: unknown): strin
   )
   const stack = sanitizedErrorText(error instanceof Error ? error.stack : undefined, context.source, sanitizedSource)
   const cause = error instanceof Error && error.cause instanceof Error ? error.cause : undefined
-  console.error("[x-demo] image load failed", {
+  console.error("[xtooey] image load failed", {
     ...context,
     source: sanitizedSource,
     error: {
@@ -1518,7 +1539,7 @@ function updateImageViewText(): void {
   const position = imageItems.length > 1 ? `${imageIndex + 1}/${imageItems.length} · ` : ""
   const status = imageMessage ? ` · ${imageMessage}` : ""
   const panKeys = ["x.image.pan-left", "x.image.pan-down", "x.image.pan-up", "x.image.pan-right"]
-    .map((command) => formatCommandKey(command as XtuiCommandName))
+    .map((command) => formatCommandKey(command as XtooeyCommandName))
     .join("/")
   const metrics = postMetricItems(imageTweet)
   imageHeaderText.content = t`${bold(fg(COLORS.primary)(`IMAGE · ${position}${Math.round(imageZoom * 100)}%`))}${fg(COLORS.secondary)(`   ${formatCommandKey("x.image.previous")}/${formatCommandKey("x.image.next")} image   ${formatCommandKey("x.image.zoom-in")}/${formatCommandKey("x.image.zoom-out")} zoom   ${panKeys} pan   ${formatCommandKey("x.image.close")} back${status}`)}`
@@ -1752,10 +1773,10 @@ function openBindingsOverlay(): boolean {
   )
     return false
   const focused = currentRenderer.currentFocusedRenderable
-  const keysByCommand = new Map<XtuiCommandName, string[]>()
+  const keysByCommand = new Map<XtooeyCommandName, string[]>()
   for (const active of activeKeymap.getActiveKeys()) {
     if (typeof active.command !== "string" || !(active.command in COMMAND_DETAILS)) continue
-    const name = active.command as XtuiCommandName
+    const name = active.command as XtooeyCommandName
     if (
       focused instanceof InputRenderable &&
       (name === "app.quit" || name === "app.console" || name === "x.modal.back")
@@ -3305,7 +3326,7 @@ function getRendererKeymap(renderer: CliRenderer): Keymap<Renderable, KeyEvent> 
   return keymap
 }
 
-function configuredBindings(commands: readonly XtuiCommandName[]): Record<string, string> {
+function configuredBindings(commands: readonly XtooeyCommandName[]): Record<string, string> {
   return Object.fromEntries(commands.map((command) => [command, activeConfig.keybindings[command]]))
 }
 
@@ -3324,7 +3345,7 @@ function registerXKeymap(renderer: CliRenderer): ConfigIssue[] {
   const keymap = getRendererKeymap(renderer)
   activeKeymap = keymap
   const configIssues: ConfigIssue[] = []
-  for (const command of Object.keys(DEFAULT_KEYBINDINGS) as XtuiCommandName[]) {
+  for (const command of Object.keys(DEFAULT_KEYBINDINGS) as XtooeyCommandName[]) {
     try {
       const sequence = keymap.parseKeySequence(activeConfig.keybindings[command])
       if (sequence.length !== 1) throw new Error("Expected one key stroke")
@@ -3337,8 +3358,8 @@ function registerXKeymap(renderer: CliRenderer): ConfigIssue[] {
       activeConfig.keybindings[command] = fallback
     }
   }
-  const commandNames = Object.keys(DEFAULT_KEYBINDINGS) as XtuiCommandName[]
-  const bindingMatch = (command: XtuiCommandName) =>
+  const commandNames = Object.keys(DEFAULT_KEYBINDINGS) as XtooeyCommandName[]
+  const bindingMatch = (command: XtooeyCommandName) =>
     keymap.parseKeySequence(activeConfig.keybindings[command])[0]!.match
   const helpDefault = DEFAULT_KEYBINDINGS["app.bindings"]
   const helpConflicts = commandNames.filter(
@@ -4027,7 +4048,7 @@ function activateTimelineStream(stream: TimelineStream, focus: boolean = true): 
   return state
 }
 
-export function run(renderer: CliRenderer, options: XDemoRunOptions = {}): void {
+export function run(renderer: CliRenderer, options: XtooeyRunOptions = {}): void {
   generation += 1
   currentRenderer = renderer
   activeConfig = {
@@ -4071,10 +4092,10 @@ export function run(renderer: CliRenderer, options: XDemoRunOptions = {}): void 
   twitterClientFactory = options.twitterClientFactory ?? ((clientOptions) => new TwitterClient(clientOptions))
   openExternalUrl = options.openUrl ?? launchUrl
   renderer.setBackgroundColor(COLORS.background)
-  renderer.setTerminalTitle("X · OpenTUI")
+  renderer.setTerminalTitle(`${APP_NAME} · X`)
 
   root = new BoxRenderable(renderer, {
-    id: "x-demo-root",
+    id: "xtooey-root",
     width: "100%",
     height: "100%",
     flexDirection: "column",
@@ -4193,13 +4214,16 @@ export function run(renderer: CliRenderer, options: XDemoRunOptions = {}): void 
     alignItems: "center",
     backgroundColor: COLORS.panel,
   })
-  activitySpinner = new SpinnerRenderable(renderer, {
-    name: "dots",
-    color: COLORS.amber,
-    backgroundColor: "transparent",
+  activitySpinner = new TextRenderable(renderer, {
+    id: "x-activity-spinner",
+    content: ACTIVITY_SPINNER_FRAMES[0],
+    width: 1,
+    height: 1,
+    fg: COLORS.amber,
+    bg: "transparent",
+    selectable: false,
     visible: false,
   })
-  activitySpinner.id = "x-activity-spinner"
   activityLabel = new TextRenderable(renderer, {
     id: "x-activity-label",
     content: "",
@@ -4270,6 +4294,7 @@ export function destroy(): void {
   imageFallbackSource = null
   bindingsReturnFocus = null
   loadingActivities.clear()
+  stopActivitySpinner()
 
   while (keymapDisposers.length > 0) keymapDisposers.pop()?.()
   modalRoutes = []

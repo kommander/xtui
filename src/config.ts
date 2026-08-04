@@ -3,8 +3,9 @@ import { homedir } from "node:os"
 import { isAbsolute, join } from "node:path"
 import { parse, printParseErrorCode, type ParseError } from "jsonc-parser"
 import * as z from "zod"
+import packageJson from "../package.json" with { type: "json" }
 
-export const CONFIG_SCHEMA_URL = "https://raw.githubusercontent.com/kommander/xtui/main/xtui.schema.json"
+export const CONFIG_SCHEMA_URL = `https://raw.githubusercontent.com/kommander/xtui/v${packageJson.version}/xtooey.schema.json`
 
 export const DEFAULT_KEYBINDINGS = {
   "x.feed.next": "j",
@@ -36,12 +37,12 @@ export const DEFAULT_KEYBINDINGS = {
   "app.quit": "ctrl+c",
 } as const
 
-export type XtuiCommandName = keyof typeof DEFAULT_KEYBINDINGS
-export type XtuiKeybindings = Record<XtuiCommandName, string>
+export type XtooeyCommandName = keyof typeof DEFAULT_KEYBINDINGS
+export type XtooeyKeybindings = Record<XtooeyCommandName, string>
 
-export interface XtuiConfig {
+export interface XtooeyConfig {
   scrollbar: boolean
-  keybindings: XtuiKeybindings
+  keybindings: XtooeyKeybindings
 }
 
 export interface ConfigIssue {
@@ -52,7 +53,7 @@ export interface ConfigIssue {
 }
 
 export interface ConfigLoadResult {
-  config: XtuiConfig
+  config: XtooeyConfig
   issues: ConfigIssue[]
   path: string
 }
@@ -98,9 +99,9 @@ const keybindingShape = {
   "app.bindings": bindingsKeySchema.meta({ default: DEFAULT_KEYBINDINGS["app.bindings"] }),
   "app.console": keybindingSchema.meta({ default: DEFAULT_KEYBINDINGS["app.console"] }),
   "app.quit": keybindingSchema.meta({ default: DEFAULT_KEYBINDINGS["app.quit"] }),
-} satisfies Record<XtuiCommandName, z.ZodType<string>>
+} satisfies Record<XtooeyCommandName, z.ZodType<string>>
 
-export const xtuiConfigFileSchema = z
+export const xtooeyConfigFileSchema = z
   .strictObject({
     $schema: z.string().optional(),
     scrollbar: z
@@ -110,28 +111,28 @@ export const xtuiConfigFileSchema = z
       .meta({ default: false }),
     keybindings: z.strictObject(keybindingShape).partial().optional().describe("Application command keybindings."),
   })
-  .describe("xtui user configuration")
+  .describe("xtooey user configuration")
 
-export const XTUI_CONFIG_JSON_SCHEMA = {
+export const XTOOEY_CONFIG_JSON_SCHEMA = {
   $id: CONFIG_SCHEMA_URL,
-  ...z.toJSONSchema(xtuiConfigFileSchema, { target: "draft-2020-12" }),
+  ...z.toJSONSchema(xtooeyConfigFileSchema, { target: "draft-2020-12" }),
 }
 
-export const DEFAULT_CONFIG: XtuiConfig = {
+export const DEFAULT_CONFIG: XtooeyConfig = {
   scrollbar: false,
   keybindings: { ...DEFAULT_KEYBINDINGS },
 }
 
 export function configFilePath(): string {
   const appData = process.env.APPDATA?.trim()
-  if (process.platform === "win32" && appData) return join(appData, "xtui", "config.jsonc")
+  if (process.platform === "win32" && appData) return join(appData, "xtooey", "config.jsonc")
 
   const xdgConfigHome = process.env.XDG_CONFIG_HOME?.trim()
   const configHome = xdgConfigHome && isAbsolute(xdgConfigHome) ? xdgConfigHome : join(homedir(), ".config")
-  return join(configHome, "xtui", "config.jsonc")
+  return join(configHome, "xtooey", "config.jsonc")
 }
 
-function defaultConfig(): XtuiConfig {
+function defaultConfig(): XtooeyConfig {
   return { scrollbar: DEFAULT_CONFIG.scrollbar, keybindings: { ...DEFAULT_KEYBINDINGS } }
 }
 
@@ -172,7 +173,7 @@ export function loadConfig(path: string = configFilePath()): ConfigLoadResult {
     }
   }
 
-  const result = xtuiConfigFileSchema.safeParse(input)
+  const result = xtooeyConfigFileSchema.safeParse(input)
   if (result.success) {
     return {
       config: {
@@ -190,7 +191,7 @@ export function loadConfig(path: string = configFilePath()): ConfigLoadResult {
 
     const keybindings = z.record(z.string(), z.unknown()).safeParse(record.data.keybindings)
     if (keybindings.success) {
-      for (const command of Object.keys(DEFAULT_KEYBINDINGS) as XtuiCommandName[]) {
+      for (const command of Object.keys(DEFAULT_KEYBINDINGS) as XtooeyCommandName[]) {
         const binding = keybindingShape[command].safeParse(keybindings.data[command])
         if (binding.success) config.keybindings[command] = binding.data
       }
@@ -207,5 +208,5 @@ export function loadConfig(path: string = configFilePath()): ConfigLoadResult {
 export function formatConfigIssue(filePath: string, issue: ConfigIssue): string {
   const location =
     issue.line !== undefined ? `:${issue.line}:${issue.column ?? 1}` : issue.path ? ` at ${issue.path}` : ""
-  return `[xtui] Ignoring invalid config in ${filePath}${location}: ${issue.message}`
+  return `[xtooey] Ignoring invalid config in ${filePath}${location}: ${issue.message}`
 }

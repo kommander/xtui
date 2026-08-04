@@ -6,7 +6,7 @@ const targetId = target?.replace(/^bun-/, "") ?? `${hostPlatform}-${process.arch
 const isWindows = targetId.startsWith("windows-")
 const isLinux = targetId.startsWith("linux-")
 const libc = targetId.includes("musl") ? "musl" : "glibc"
-const outfile = `dist/xtui-${targetId}${isWindows ? ".exe" : ""}`
+const outfile = `dist/xtooey-${targetId}${isWindows ? ".exe" : ""}`
 
 await mkdir("dist", { recursive: true })
 
@@ -32,7 +32,7 @@ const result = await Bun.build({
 
 if (!result.success) {
   for (const log of result.logs) console.error(log)
-  throw new Error("Failed to build xtui")
+  throw new Error("Failed to build xtooey")
 }
 
 console.log(`Built ${outfile}`)

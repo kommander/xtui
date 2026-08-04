@@ -5,7 +5,7 @@ import { join } from "node:path"
 import {
   DEFAULT_CONFIG,
   DEFAULT_KEYBINDINGS,
-  XTUI_CONFIG_JSON_SCHEMA,
+  XTOOEY_CONFIG_JSON_SCHEMA,
   formatConfigIssue,
   loadConfig,
 } from "./config.js"
@@ -13,7 +13,7 @@ import {
 const directories: string[] = []
 
 function configFile(contents?: string): string {
-  const directory = mkdtempSync(join(tmpdir(), "xtui-config-test-"))
+  const directory = mkdtempSync(join(tmpdir(), "xtooey-config-test-"))
   directories.push(directory)
   const path = join(directory, "config.jsonc")
   if (contents !== undefined) writeFileSync(path, contents)
@@ -86,7 +86,7 @@ describe("configuration", () => {
   })
 
   test("keeps the checked-in JSON Schema synchronized", () => {
-    const checkedIn = JSON.parse(readFileSync(join(import.meta.dir, "..", "xtui.schema.json"), "utf8"))
-    expect(checkedIn).toEqual(XTUI_CONFIG_JSON_SCHEMA)
+    const checkedIn = JSON.parse(readFileSync(join(import.meta.dir, "..", "xtooey.schema.json"), "utf8"))
+    expect(checkedIn).toEqual(XTOOEY_CONFIG_JSON_SCHEMA)
   })
 })

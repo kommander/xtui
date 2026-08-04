@@ -8,11 +8,11 @@ export type BrowserSourceId = (typeof BROWSER_SOURCE_IDS)[number]
 
 function preferencePath(): string {
   const appData = process.env.APPDATA?.trim()
-  if (process.platform === "win32" && appData) return join(appData, "xtui", "browser-source")
+  if (process.platform === "win32" && appData) return join(appData, "xtooey", "browser-source")
 
   const xdgConfigHome = process.env.XDG_CONFIG_HOME?.trim()
   const configHome = xdgConfigHome && isAbsolute(xdgConfigHome) ? xdgConfigHome : join(homedir(), ".config")
-  return join(configHome, "xtui", "browser-source")
+  return join(configHome, "xtooey", "browser-source")
 }
 
 export function loadRememberedBrowserSource(path: string = preferencePath()): BrowserSourceId | null {

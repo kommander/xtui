@@ -1,4 +1,4 @@
-# xtui
+# xtooey
 
 A compact, keyboard-driven X client built with [OpenTUI](https://opentui.com). It renders timelines, quoted posts, profile pictures, and post media directly in the terminal.
 
@@ -20,17 +20,31 @@ A compact, keyboard-driven X client built with [OpenTUI](https://opentui.com). I
 
 ## Install
 
+Run directly from npm:
+
 ```bash
-bun install
+bunx xtooey
 ```
 
-## Run
+Or install the command globally. Bun is still required because the published CLI runs its TypeScript source with the Bun shebang.
 
 ```bash
+bun add --global xtooey
+xtooey
+```
+
+`npm install --global xtooey` also works when Bun is installed and available on `PATH`.
+
+## Development
+
+Install dependencies and run from a checkout:
+
+```bash
+bun install
 bun run start
 ```
 
-For development with automatic restart:
+For automatic restart:
 
 ```bash
 bun run dev
@@ -48,7 +62,7 @@ Browser mode reads `auth_token` and `ct0` from a selected local browser profile.
 
 Your OS may request Keychain, keyring, DPAPI, or browser-cookie-file access. Select the browser that owns the X session you intend to use.
 
-After you choose a browser, xtui remembers only that browser's ID and tries its cookie store automatically on later starts. Press `A` from the feed to open the full connection flow and replace it with another browser, manual cookies, or the official API.
+After you choose a browser, xtooey remembers only that browser's ID and tries its cookie store automatically on later starts. Press `A` from the feed to open the full connection flow and replace it with another browser, manual cookies, or the official API.
 
 ## Controls
 
@@ -76,16 +90,16 @@ Image failures are logged to OpenTUI's console with sanitized URLs, post/media c
 
 ## Configuration
 
-xtui reads one optional JSONC file. JSON is also supported because it is a subset of JSONC.
+xtooey reads one optional JSONC file. JSON is also supported because it is a subset of JSONC.
 
-- macOS and Linux: `$XDG_CONFIG_HOME/xtui/config.jsonc`, or `~/.config/xtui/config.jsonc` when `XDG_CONFIG_HOME` is unset or relative
-- Windows: `%APPDATA%\xtui\config.jsonc`, falling back to `~/.config/xtui/config.jsonc`
+- macOS and Linux: `$XDG_CONFIG_HOME/xtooey/config.jsonc`, or `~/.config/xtooey/config.jsonc` when `XDG_CONFIG_HOME` is unset or relative
+- Windows: `%APPDATA%\xtooey\config.jsonc`, falling back to `~/.config/xtooey/config.jsonc`
 
-There are no project-local files or merged configuration layers. Unknown or invalid fields are ignored independently, valid sibling fields still apply, and defaults are used for anything rejected. xtui logs each problem and opens OpenTUI's console automatically.
+There are no project-local files or merged configuration layers. Unknown or invalid fields are ignored independently, valid sibling fields still apply, and defaults are used for anything rejected. xtooey logs each problem and opens OpenTUI's console automatically.
 
 ```jsonc
 {
-  "$schema": "https://raw.githubusercontent.com/kommander/xtui/main/xtui.schema.json",
+  "$schema": "https://raw.githubusercontent.com/kommander/xtui/v0.1.0/xtooey.schema.json",
   // Hidden by default. Scrolling still works with keys and the mouse wheel.
   "scrollbar": true,
   "keybindings": {
@@ -130,7 +144,7 @@ Every application command can be rebound to one OpenTUI key stroke. Single keys 
 | `app.console`            | `` ` ``  |
 | `app.quit`               | `ctrl+c` |
 
-Run `bun run schema` after changing the runtime schema to regenerate `xtui.schema.json`.
+Run `bun run schema` after changing the runtime schema to regenerate `xtooey.schema.json`.
 
 ## Build
 
@@ -158,6 +172,10 @@ bun install --os="*" --cpu="*" @opentui/core@0.5.1
 ```
 
 Cross-compiled executables must be smoke-tested on their target OS and architecture.
+
+## Releasing
+
+Production npm releases use npm Trusted Publishing from GitHub Actions. See [RELEASING.md](RELEASING.md) for the one-time npm/GitHub setup and release procedure.
 
 ## Development Checks
 

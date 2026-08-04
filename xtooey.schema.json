@@ -1,5 +1,5 @@
 {
-  "$id": "https://raw.githubusercontent.com/kommander/xtui/main/xtui.schema.json",
+  "$id": "https://raw.githubusercontent.com/kommander/xtui/v0.1.0/xtooey.schema.json",
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "type": "object",
   "properties": {
@@ -191,5 +191,5 @@
     }
   },
   "additionalProperties": false,
-  "description": "xtui user configuration"
+  "description": "xtooey user configuration"
 }

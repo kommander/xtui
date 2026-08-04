@@ -6,7 +6,7 @@ import { loadRememberedBrowserSource, rememberBrowserSource, type BrowserSourceI
 const directories: string[] = []
 
 function preferenceFile(): string {
-  const directory = mkdtempSync(join(process.cwd(), ".xtui-preference-test-"))
+  const directory = mkdtempSync(join(process.cwd(), ".xtooey-preference-test-"))
   directories.push(directory)
   return join(directory, "nested", "browser-source")
 }
