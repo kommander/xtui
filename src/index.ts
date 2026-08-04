@@ -1548,17 +1548,38 @@ function addPostMedia(
 ): void {
   const mediaItems = displayMediaItems(tweet)
   if (mediaItems.length === 0) return
+  const visibleMedia = mediaItems.slice(0, 4)
+  const isMosaic = visibleMedia.length > 1
 
   const mediaBox = new BoxRenderable(card.ctx, {
     id: `${idPrefix}-${postIndex}`,
     width: "100%",
-    flexDirection: "column",
+    height: isMosaic ? MEDIA_MIN_ROWS : "auto",
+    flexDirection: visibleMedia.length === 4 ? "column" : "row",
     flexShrink: 0,
     marginTop: 1,
     marginBottom: 1,
+    gap: isMosaic ? 1 : 0,
+    overflow: "hidden",
   })
+  let firstImage: ImageRenderable | null = null
+  let mosaicHeightUpdateQueued = false
+  const horizontalGapContainers: BoxRenderable[] = []
+  const updateMosaicHeight = () => {
+    mosaicHeightUpdateQueued = false
+    if (!isMosaic || !firstImage || mediaBox.isDestroyed || mediaBox.width <= 0) return
+    for (const container of horizontalGapContainers) container.columnGap = mediaBox.width < 3 ? 0 : 1
+    const nextHeight = Math.max(MEDIA_MIN_ROWS, Math.round((mediaBox.width * 9) / (16 * firstImage.cellAspectRatio)))
+    if (mediaBox.height !== nextHeight) mediaBox.height = nextHeight
+  }
+  const scheduleMosaicHeightUpdate = () => {
+    if (!isMosaic || mosaicHeightUpdateQueued) return
+    mosaicHeightUpdateQueued = true
+    queueMicrotask(updateMosaicHeight)
+  }
+  mediaBox.onSizeChange = scheduleMosaicHeightUpdate
 
-  for (const [mediaIndex, media] of mediaItems.entries()) {
+  const createTile = (media: TweetMedia, mediaIndex: number): BoxRenderable => {
     const source = media.previewUrl || media.url
     let sourceWidth = media.width ?? 0
     let sourceHeight = media.height ?? 0
@@ -1566,19 +1587,38 @@ function addPostMedia(
     let image: ImageRenderable
     let failureReported = false
 
+    const tile = new BoxRenderable(card.ctx, {
+      id: `${idPrefix}-tile-${postIndex}-${mediaIndex}`,
+      position: "relative",
+      width: isMosaic ? "auto" : "100%",
+      height: isMosaic ? "100%" : MEDIA_MIN_ROWS,
+      flexBasis: isMosaic ? 0 : undefined,
+      flexGrow: isMosaic ? 1 : 0,
+      flexShrink: isMosaic ? 1 : 0,
+      overflow: "hidden",
+      backgroundColor: COLORS.background,
+    })
+
     const mediaStatus = new TextRenderable(card.ctx, {
       id: `${idPrefix}-status-${postIndex}-${mediaIndex}`,
       content: `LOADING ${media.type === "photo" ? "IMAGE" : "VIDEO PREVIEW"}`,
+      position: "absolute",
+      left: 0,
+      bottom: 0,
+      width: "100%",
+      height: 1,
+      zIndex: 2,
       fg: COLORS.muted,
-      wrapMode: "word",
+      bg: COLORS.panel,
+      wrapMode: "none",
     })
 
     const updateHeight = () => {
       heightUpdateQueued = false
-      if (image.isDestroyed || image.width <= 0 || sourceWidth <= 0 || sourceHeight <= 0) return
-      const naturalRows = Math.round((image.width * sourceHeight) / (sourceWidth * image.cellAspectRatio))
+      if (isMosaic || image.isDestroyed || tile.width <= 0 || sourceWidth <= 0 || sourceHeight <= 0) return
+      const naturalRows = Math.round((tile.width * sourceHeight) / (sourceWidth * image.cellAspectRatio))
       const nextHeight = Math.max(MEDIA_MIN_ROWS, Math.min(MEDIA_MAX_ROWS, naturalRows))
-      if (image.height !== nextHeight) image.height = nextHeight
+      if (tile.height !== nextHeight) tile.height = nextHeight
     }
     const scheduleHeightUpdate = () => {
       if (heightUpdateQueued) return
@@ -1607,29 +1647,95 @@ function addPostMedia(
     image = new ImageRenderable(card.ctx, {
       id: `${idPrefix}-image-${postIndex}-${mediaIndex}`,
       source,
+      position: "absolute",
+      left: 0,
+      top: 0,
       width: "100%",
-      height: MEDIA_MIN_ROWS,
-      flexShrink: 0,
-      fit: "fit",
+      height: "100%",
+      fit: isMosaic ? "cover" : "fit",
       protocol: "auto",
-      onSizeChange: scheduleHeightUpdate,
+      onSizeChange: isMosaic ? undefined : scheduleHeightUpdate,
       onLoad: (loaded) => {
         sourceWidth = loaded.width
         sourceHeight = loaded.height
         mediaStatus.content = media.type === "photo" ? "" : "VIDEO PREVIEW"
         mediaStatus.fg = COLORS.muted
         mediaStatus.visible = media.type !== "photo"
-        scheduleHeightUpdate()
+        if (isMosaic) scheduleMosaicHeightUpdate()
+        else scheduleHeightUpdate()
       },
       onError: handleMediaFailure,
     })
+    firstImage ??= image
     void image.loadPromise?.catch(handleMediaFailure)
-    if (media.type === "photo" && onOpen) makeClickable(image, () => onOpen(tweet, media))
-    mediaBox.add(image)
-    mediaBox.add(mediaStatus)
+    if (media.type === "photo" && onOpen) {
+      if (isMosaic) makeClickable(tile, () => onOpen(tweet, media))
+      else makeClickable(image, () => onOpen(tweet, media))
+    }
+    tile.add(image)
+    tile.add(mediaStatus)
+    return tile
+  }
+
+  const tiles = visibleMedia.map(createTile)
+  if (visibleMedia.length <= 2) {
+    if (isMosaic) horizontalGapContainers.push(mediaBox)
+    for (const tile of tiles) mediaBox.add(tile)
+  } else if (visibleMedia.length === 3) {
+    horizontalGapContainers.push(mediaBox)
+    tiles[1]!.height = "auto"
+    tiles[2]!.height = "auto"
+    const rightColumn = new BoxRenderable(card.ctx, {
+      id: `${idPrefix}-column-${postIndex}`,
+      height: "100%",
+      flexBasis: 0,
+      flexGrow: 1,
+      flexShrink: 1,
+      flexDirection: "column",
+      gap: 1,
+    })
+    rightColumn.add(tiles[1]!)
+    rightColumn.add(tiles[2]!)
+    mediaBox.add(tiles[0]!)
+    mediaBox.add(rightColumn)
+  } else {
+    for (let rowIndex = 0; rowIndex < 2; rowIndex += 1) {
+      const row = new BoxRenderable(card.ctx, {
+        id: `${idPrefix}-row-${postIndex}-${rowIndex}`,
+        width: "100%",
+        flexBasis: 0,
+        flexGrow: 1,
+        flexShrink: 1,
+        flexDirection: "row",
+        gap: 1,
+      })
+      row.add(tiles[rowIndex * 2]!)
+      row.add(tiles[rowIndex * 2 + 1]!)
+      horizontalGapContainers.push(row)
+      mediaBox.add(row)
+    }
+  }
+
+  if (mediaItems.length > 4) {
+    tiles[3]!.add(
+      new TextRenderable(card.ctx, {
+        id: `${idPrefix}-more-${postIndex}`,
+        content: t`${bold(fg(COLORS.primary)(`+${mediaItems.length - 4}`))}`,
+        position: "absolute",
+        right: 0,
+        bottom: 0,
+        width: String(mediaItems.length - 4).length + 1,
+        height: 1,
+        zIndex: 3,
+        bg: COLORS.panel,
+        wrapMode: "none",
+        selectable: false,
+      }),
+    )
   }
 
   card.add(mediaBox)
+  scheduleMosaicHeightUpdate()
 }
 
 function addQuotedPost(

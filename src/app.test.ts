@@ -6,6 +6,7 @@ import {
   ImageRenderable,
   ScrollBoxRenderable,
   TextAttributes,
+  TextRenderable,
   type CliRendererErrorEvent,
   type CliRendererHandlerErrorEvent,
   type Renderable,
@@ -1077,6 +1078,93 @@ describe("xtui application", () => {
       expect(verticalGap(quote, metrics)).toBe(1)
       expect(verticalGap(quotedBody, quotedMedia)).toBe(1)
       expect(quote.screenY + quote.height - 1 - (quotedMedia.screenY + quotedMedia.height)).toBe(1)
+
+      app.api.assertDone()
+      expectHealthy(app)
+    } finally {
+      await app.close()
+    }
+  })
+
+  test("lays out one to four media items like X and marks overflow", async () => {
+    const app = await createApp(40)
+    const posts: Array<Record<string, unknown>> = []
+    const media: Array<Record<string, unknown>> = []
+    for (let count = 1; count <= 5; count += 1) {
+      const mediaKeys: string[] = []
+      for (let index = 0; index < count; index += 1) {
+        const mediaKey = `mosaic-${count}-${index}`
+        mediaKeys.push(mediaKey)
+        media.push({
+          media_key: mediaKey,
+          type: "photo",
+          url: index % 2 === 0 ? RED_PNG_DATA_URL : BLUE_PNG_DATA_URL,
+          width: 1,
+          height: 1,
+        })
+      }
+      posts.push({ id: `74${count}`, text: `${count} image post`, attachments: { media_keys: mediaKeys } })
+    }
+    app.api.expectUser("mosaic-token", {
+      body: { data: { id: "42", name: "Reader", username: "reader" } },
+    })
+    app.api.expectTimeline("mosaic-token", "42", {
+      body: { data: posts, includes: { media }, meta: {} },
+    })
+
+    try {
+      await app.setup.waitForFrame((frame) => frame.includes("CONNECT X"))
+      await loginOfficial(app, "mosaic-token")
+      await waitForApiFrame(app, 2, (frame) => frame.includes("1 image post"))
+      await app.setup.flush({ maxPasses: 100 })
+      const descendant = (id: string) => app.setup.renderer.root.findDescendantById(id)!
+
+      expect(getImage(app, "x-post-media-image-0-0").fit).toBe("fit")
+
+      const twoFirst = descendant("x-post-media-tile-1-0")
+      const twoSecond = descendant("x-post-media-tile-1-1")
+      expect(getImage(app, "x-post-media-image-1-0").fit).toBe("cover")
+      expect(twoFirst.screenY).toBe(twoSecond.screenY)
+      expect(twoFirst.height).toBe(twoSecond.height)
+      expect(twoSecond.screenX - twoFirst.screenX - twoFirst.width).toBe(1)
+      expect(Math.abs(twoFirst.width - twoSecond.width)).toBeLessThanOrEqual(1)
+
+      const threeFirst = descendant("x-post-media-tile-2-0")
+      const threeSecond = descendant("x-post-media-tile-2-1")
+      const threeThird = descendant("x-post-media-tile-2-2")
+      expect(threeFirst.height).toBe(descendant("x-post-media-2").height)
+      expect(threeSecond.screenX).toBe(threeThird.screenX)
+      expect(threeThird.screenY - threeSecond.screenY - threeSecond.height).toBe(1)
+      expect(Math.abs(threeSecond.height - threeThird.height)).toBeLessThanOrEqual(1)
+
+      const fourFirst = descendant("x-post-media-tile-3-0")
+      const fourSecond = descendant("x-post-media-tile-3-1")
+      const fourThird = descendant("x-post-media-tile-3-2")
+      const fourFourth = descendant("x-post-media-tile-3-3")
+      expect(fourFirst.screenY).toBe(fourSecond.screenY)
+      expect(fourThird.screenY).toBe(fourFourth.screenY)
+      expect(fourFirst.screenX).toBe(fourThird.screenX)
+      expect(fourSecond.screenX).toBe(fourFourth.screenX)
+      expect(fourThird.screenY - fourFirst.screenY - fourFirst.height).toBe(1)
+
+      expect(app.setup.renderer.root.findDescendantById("x-post-media-image-4-4")).toBeUndefined()
+      const overflow = descendant("x-post-media-more-4") as TextRenderable
+      expect(overflow.content.chunks.map((chunk) => chunk.text).join("")).toBe("+1")
+
+      for (let index = 0; index < 4; index += 1) app.setup.mockInput.pressKey("j")
+      app.setup.mockInput.pressKey("i")
+      await app.setup.waitForFrame((frame) => frame.includes("IMAGE · 1/5 · 100%"))
+      for (let index = 0; index < 4; index += 1) app.setup.mockInput.pressArrow("right")
+      await app.setup.waitForFrame((frame) => frame.includes("IMAGE · 5/5 · 100%"))
+      app.setup.mockInput.pressEscape()
+
+      app.setup.renderer.resize(7, 20)
+      await app.setup.flush({ maxPasses: 100 })
+      const narrowGrid = descendant("x-post-media-1")
+      const narrowFirst = descendant("x-post-media-tile-1-0")
+      const narrowSecond = descendant("x-post-media-tile-1-1")
+      expect(narrowSecond.screenX - narrowFirst.screenX - narrowFirst.width).toBe(0)
+      expect(narrowSecond.screenX + narrowSecond.width).toBeLessThanOrEqual(narrowGrid.screenX + narrowGrid.width)
 
       app.api.assertDone()
       expectHealthy(app)
