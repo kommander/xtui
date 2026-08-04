@@ -19,7 +19,7 @@ import { destroy, run, type XDemoRunOptions } from "./index.js"
 
 const TIMELINE_QUERY = {
   max_results: "20",
-  "tweet.fields": "attachments,author_id,created_at,entities,public_metrics,referenced_tweets",
+  "tweet.fields": "attachments,author_id,created_at,entities,note_tweet,public_metrics,referenced_tweets",
   expansions:
     "attachments.media_keys,author_id,referenced_tweets.id,referenced_tweets.id.attachments.media_keys,referenced_tweets.id.author_id",
   "user.fields": "id,name,profile_image_url,username",
@@ -28,7 +28,7 @@ const TIMELINE_QUERY = {
 const COMMENTS_QUERY = {
   sort_order: "recency",
   max_results: "100",
-  "tweet.fields": "attachments,author_id,created_at,entities,public_metrics,referenced_tweets",
+  "tweet.fields": "attachments,author_id,created_at,entities,note_tweet,public_metrics,referenced_tweets",
   expansions:
     "attachments.media_keys,author_id,referenced_tweets.id,referenced_tweets.id.attachments.media_keys,referenced_tweets.id.author_id",
   "user.fields": "id,name,profile_image_url,username",
@@ -603,6 +603,70 @@ describe("xtui application", () => {
         (frame) => frame.includes("[E] Show More") && !frame.includes(suffix),
       )
       expect(collapsedAgain).not.toContain(suffix)
+
+      app.api.assertDone()
+      expectHealthy(app)
+    } finally {
+      await app.close()
+    }
+  })
+
+  test("normalizes documented API retweets to the original post", async () => {
+    const openedUrls: string[] = []
+    const app = await createApp(20, {
+      async openUrl(url) {
+        openedUrls.push(url)
+      },
+    })
+    app.api.expectUser("official-retweet-token", {
+      body: { data: { id: "42", name: "Reader", username: "reader" } },
+    })
+    app.api.expectTimeline("official-retweet-token", "42", {
+      body: {
+        data: [
+          {
+            id: "8001",
+            text: "RT @original: truncated…",
+            author_id: "7",
+            referenced_tweets: [{ id: "8000", type: "retweeted" }],
+            public_metrics: { reply_count: 0, retweet_count: 4, like_count: 0 },
+          },
+        ],
+        includes: {
+          users: [
+            { id: "7", name: "Reposter", username: "reposter" },
+            { id: "8", name: "Original", username: "original" },
+          ],
+          tweets: [
+            {
+              id: "8000",
+              text: "Complete documented API orig…",
+              note_tweet: { text: "Complete documented API original" },
+              author_id: "8",
+              public_metrics: { reply_count: 2, quote_count: 3, retweet_count: 5, like_count: 7 },
+            },
+          ],
+        },
+        meta: {},
+      },
+    })
+
+    try {
+      await app.setup.waitForFrame((frame) => frame.includes("CONNECT X"))
+      await loginOfficial(app, "official-retweet-token")
+      const frame = await waitForApiFrame(app, 2, (value) => value.includes("Reposter reposted"))
+      expect(frame).toContain("Original @original")
+      expect(frame).toContain("Complete documented API original")
+      expect(frame).not.toContain("orig…")
+      expect(frame).not.toContain("truncated…")
+      expect(frame).toContain("↩ 2")
+      expect(frame).toContain("♥ 7")
+      expect(frame).toContain("↻ 5")
+      expect(getCard(app, "8001")).toBeDefined()
+
+      app.setup.mockInput.pressKey("o")
+      await new Promise<void>((resolve) => setImmediate(resolve))
+      expect(openedUrls).toEqual(["https://x.com/original/status/8000"])
 
       app.api.assertDone()
       expectHealthy(app)
@@ -1451,6 +1515,174 @@ describe("xtui application", () => {
       )
       expect(app.setup.renderer.currentFocusedRenderable?.id).toBe("x-feed")
       expect(app.api.requests).toHaveLength(0)
+      app.api.assertDone()
+      expectHealthy(app)
+    } finally {
+      await app.close()
+    }
+  })
+
+  test("renders browser-session retweets from the complete original tweet", async () => {
+    const openedUrls: string[] = []
+    const originalText =
+      "Engineers and CTOs on X: I wrote this for you. https://t.co/original-one\n\nModels and devs on X: I wrote this for you both. https://t.co/original-two\n\nEnjoy. Or not."
+    const outerTweet: TweetData = {
+      id: "2084577946098905462",
+      text: "RT @Steve_Yegge: Engineers and CTOs on X: I wrote this for you. https://t.co/wrapper\n\nModels and devs on X: I wrote this for you both. h…",
+      author: { name: "Matteo Collina", username: "matteocollina" },
+      replyCount: 0,
+      retweetCount: 90,
+      likeCount: 0,
+      _raw: {
+        rest_id: "2084577946098905462",
+        legacy: {
+          full_text:
+            "RT @Steve_Yegge: Engineers and CTOs on X: I wrote this for you. https://t.co/wrapper\n\nModels and devs on X: I wrote this for you both. h…",
+          retweeted_status_result: {
+            result: {
+              rest_id: "2084171673369219375",
+              core: {
+                user_results: {
+                  result: {
+                    user: {
+                      rest_id: "123",
+                      legacy: { name: "Steve Yegge", screen_name: "Steve_Yegge" },
+                    },
+                  },
+                },
+              },
+              legacy: {
+                full_text: "Legacy original text",
+                created_at: "Tue Aug 04 12:00:00 +0000 2026",
+                reply_count: 21,
+                quote_count: 7,
+                retweet_count: 1,
+                favorite_count: 46,
+                conversation_id_str: "2084171673369219375",
+                extended_entities: {
+                  media: [
+                    {
+                      media_url_https: RED_PNG_DATA_URL,
+                      type: "photo",
+                      sizes: { large: { w: 1, h: 1 } },
+                    },
+                  ],
+                },
+              },
+              note_tweet: { note_tweet_results: { result: { text: originalText } } },
+            },
+          },
+        },
+      } as unknown as NonNullable<TweetData["_raw"]>,
+    }
+    const articleRetweet: TweetData = {
+      id: "article-repost",
+      text: "RT @article_author: Article title…",
+      author: { name: "Article Reposter", username: "article_reposter" },
+      _raw: {
+        rest_id: "article-repost",
+        legacy: {
+          full_text: "RT @article_author: Article title…",
+          retweeted_status_result: {
+            result: {
+              rest_id: "article-original",
+              core: {
+                user_results: {
+                  result: {
+                    rest_id: "article-user",
+                    legacy: { name: "Article Author", screen_name: "article_author" },
+                  },
+                },
+              },
+              legacy: { full_text: "Article title https://t.co/article", reply_count: 3, favorite_count: 5 },
+              article: {
+                article_results: {
+                  result: {
+                    title: "Article title",
+                    content_state: {
+                      blocks: [
+                        { key: "title", type: "header-one", text: "Article title" },
+                        { key: "body", type: "unstyled", text: "Full article body from content state." },
+                      ],
+                      entityMap: {},
+                    },
+                  },
+                },
+              },
+            },
+          },
+        },
+      } as unknown as NonNullable<TweetData["_raw"]>,
+    }
+    const repliesCalls: string[] = []
+    const fakeClient = {
+      async getHomeTimeline() {
+        return { tweets: [outerTweet, articleRetweet] }
+      },
+      async getHomeLatestTimeline() {
+        return { tweets: [outerTweet, articleRetweet] }
+      },
+      async getRepliesPaged(tweetId: string) {
+        repliesCalls.push(tweetId)
+        return { success: true, tweets: [] }
+      },
+    } as unknown as TwitterClient
+    const app = await createApp(40, {
+      twitterClientFactory() {
+        return fakeClient
+      },
+      async openUrl(url) {
+        openedUrls.push(url)
+      },
+    })
+
+    try {
+      await app.setup.waitForFrame((frame) => frame.includes("CONNECT X"))
+      await clickSelectOption(app, "x-connection-select", 1)
+      await app.setup.waitForFrame((frame) => frame.includes("ACCOUNT RISK"))
+      await clickSelectOption(app, "x-cookie-risk-select", 1)
+      await app.setup.waitForFrame((frame) => frame.includes("Use a session token or your browser login"))
+      await clickRenderable(app, "x-auth-input-box")
+      await app.setup.mockInput.typeText("auth_token=test-auth; ct0=test-csrf")
+      await clickRenderable(app, "x-auth-hint-submit")
+
+      const frame = await app.setup.waitForFrame((value) => value.includes("Matteo Collina reposted"))
+      expect(frame).toContain("Steve Yegge @Steve_Yegge")
+      expect(frame).toContain("Enjoy. Or not.")
+      expect(frame).not.toContain("RT @Steve_Yegge")
+      expect(frame).not.toContain("both. h…")
+      expect(frame).toContain("↩ 21")
+      expect(frame).toContain("♥ 46")
+      expect(frame).toContain("↻ 1")
+      expect(getCard(app, "2084577946098905462")).toBeDefined()
+      expect(app.setup.renderer.root.findDescendantById("x-post-2084171673369219375")).toBeUndefined()
+
+      app.setup.mockInput.pressKey("o")
+      await new Promise<void>((resolve) => setImmediate(resolve))
+      expect(openedUrls).toEqual(["https://x.com/Steve_Yegge/status/2084171673369219375"])
+
+      app.setup.mockInput.pressKey("i")
+      const imageFrame = await app.setup.waitForFrame((value) => value.includes("IMAGE · 100%"))
+      expect(imageFrame).toContain("21 replies   7 quotes   46 likes")
+      expect(getImage(app, "x-image-view-image").source).toBe(RED_PNG_DATA_URL)
+      app.setup.mockInput.pressEscape()
+
+      app.setup.mockInput.pressKey("j")
+      const articleFrame = await app.setup.waitForFrame((value) =>
+        value.includes("Full article body from content state."),
+      )
+      expect(articleFrame).toContain("Article Reposter reposted")
+      expect(articleFrame).toContain("Article Author @article_author")
+      expect(articleFrame).not.toContain("RT @article_author")
+      expect(getCard(app, "article-repost")).toBeDefined()
+      app.setup.mockInput.pressKey("k")
+
+      app.setup.mockInput.pressKey("c")
+      const commentsFrame = await app.setup.waitForFrame((value) => value.includes("NO DIRECT REPLIES FOUND"))
+      expect(commentsFrame).toContain("Steve Yegge @Steve_Yegge")
+      expect(commentsFrame).toContain("Matteo Collina reposted")
+      expect(repliesCalls).toEqual(["2084171673369219375"])
+
       app.api.assertDone()
       expectHealthy(app)
     } finally {

@@ -34,6 +34,7 @@ import type { Keymap } from "@opentui/keymap"
 import { commandBindings, formatCommandBindings } from "@opentui/keymap/extras"
 import { createDefaultOpenTuiKeymap } from "@opentui/keymap/opentui"
 import { TwitterClient, type TweetData, type TwitterCookies } from "@steipete/bird"
+import { mapTweetResult } from "@steipete/bird/dist/lib/twitter-client-utils.js"
 import {
   ALL_PROFILES,
   getCookies,
@@ -298,6 +299,7 @@ interface XApiPost {
   text: string
   author_id?: string
   created_at?: string
+  note_tweet?: { text?: string }
   attachments?: {
     media_keys?: string[]
   }
@@ -366,7 +368,77 @@ interface TimelineReturnState {
 }
 
 type TweetMedia = NonNullable<TweetData["media"]>[number]
-type TweetWithQuoteCount = TweetData & { quoteCount?: number }
+interface RepostContext {
+  id: string
+  author: TweetData["author"]
+}
+
+type AppTweetData = TweetData & {
+  quoteCount?: number
+  wrapperUrls?: string[]
+  timelineItemId?: string
+  repostedBy?: RepostContext
+}
+
+interface BirdRawMedia {
+  media_url_https?: string
+  type?: "photo" | "video" | "animated_gif"
+  url?: string
+  expanded_url?: string
+  sizes?: {
+    small?: { w: number; h: number }
+    medium?: { w: number; h: number }
+    large?: { w: number; h: number }
+  }
+  video_info?: {
+    duration_millis?: number
+    variants?: Array<{ bitrate?: number; content_type?: string; url?: string }>
+  }
+}
+
+interface BirdRawUser {
+  user?: BirdRawUser
+  rest_id?: string
+  id?: string
+  legacy?: { screen_name?: string; name?: string; profile_image_url_https?: string }
+  core?: { screen_name?: string; name?: string }
+  avatar?: { image_url?: string }
+}
+
+interface BirdRawTweet {
+  rest_id?: string
+  tweet?: BirdRawTweet
+  legacy?: {
+    full_text?: string
+    created_at?: string
+    reply_count?: number
+    quote_count?: number
+    retweet_count?: number
+    favorite_count?: number
+    conversation_id_str?: string
+    in_reply_to_status_id_str?: string | null
+    entities?: { urls?: XApiUrlEntity[]; media?: BirdRawMedia[] }
+    extended_entities?: { media?: BirdRawMedia[] }
+    retweeted_status_result?: { result?: BirdRawTweet }
+  }
+  core?: {
+    user_results?: {
+      result?: BirdRawUser
+    }
+  }
+  note_tweet?: {
+    note_tweet_results?: {
+      result?: {
+        text?: string
+        richtext?: { text?: string }
+        rich_text?: { text?: string }
+        content?: { text?: string; richtext?: { text?: string }; rich_text?: { text?: string } }
+      }
+    }
+  }
+  article?: Record<string, unknown>
+  quoted_status_result?: { result?: BirdRawTweet }
+}
 
 const rendererKeymaps = new WeakMap<CliRenderer, Keymap<Renderable, KeyEvent>>()
 
@@ -630,16 +702,97 @@ function officialWrapperUrls(post: XApiPost): string[] {
     .map((entity) => entity.url)
 }
 
+function withRepostContext(original: TweetData, repostId: string, author: TweetData["author"]): TweetData {
+  const normalized = original as AppTweetData
+  normalized.timelineItemId = repostId
+  normalized.repostedBy = { id: repostId, author }
+  return normalized
+}
+
+function unwrapBirdRawTweet(value: BirdRawTweet | undefined): BirdRawTweet | undefined {
+  let current = value
+  while (current?.tweet) current = current.tweet
+  return current
+}
+
+function unwrapBirdRawUser(value: BirdRawUser | undefined): BirdRawUser | undefined {
+  let current = value
+  while (current?.user) current = current.user
+  return current
+}
+
+function prepareBirdRawTweet(
+  value: BirdRawTweet | undefined,
+  visited: ReadonlySet<string> = new Set(),
+): BirdRawTweet | undefined {
+  const raw = unwrapBirdRawTweet(value)
+  if (!raw) return undefined
+  if (raw.rest_id && visited.has(raw.rest_id)) return raw
+  const nextVisited = raw.rest_id ? new Set(visited).add(raw.rest_id) : visited
+  const user = unwrapBirdRawUser(raw.core?.user_results?.result)
+  const quoted = prepareBirdRawTweet(raw.quoted_status_result?.result, nextVisited)
+  return {
+    ...raw,
+    core: raw.core
+      ? {
+          ...raw.core,
+          user_results: raw.core.user_results ? { ...raw.core.user_results, result: user } : undefined,
+        }
+      : undefined,
+    quoted_status_result: raw.quoted_status_result
+      ? { ...raw.quoted_status_result, result: quoted ?? raw.quoted_status_result.result }
+      : undefined,
+  }
+}
+
+function applyBirdQuoteCounts(tweet: TweetData, raw: BirdRawTweet | undefined): void {
+  ;(tweet as AppTweetData).quoteCount = raw?.legacy?.quote_count
+  if (tweet.quotedTweet) applyBirdQuoteCounts(tweet.quotedTweet, unwrapBirdRawTweet(raw?.quoted_status_result?.result))
+}
+
+function mapBirdOriginal(value: BirdRawTweet | undefined): TweetData | null {
+  const raw = prepareBirdRawTweet(value)
+  if (!raw) return null
+  const mapped = mapTweetResult(raw as Parameters<typeof mapTweetResult>[0], { quoteDepth: 1, includeRaw: true })
+  if (!mapped) return null
+  applyBirdQuoteCounts(mapped, raw)
+  return mapped
+}
+
+function normalizeCookieTweet(tweet: TweetData): TweetData {
+  const raw = unwrapBirdRawTweet(tweet._raw as unknown as BirdRawTweet)
+  const original = mapBirdOriginal(raw?.legacy?.retweeted_status_result?.result)
+  return original ? withRepostContext(original, tweet.id, tweet.author) : tweet
+}
+
+function normalizeCookieTweets(tweets: readonly TweetData[]): TweetData[] {
+  return tweets.map(normalizeCookieTweet)
+}
+
 function mapOfficialPosts(response: XApiResponse<XApiPost[]>, fallbackAuthor: XApiUser): TweetData[] {
   const posts = response.data ?? []
   const users = new Map((response.includes?.users ?? []).map((user) => [user.id, user]))
   const mediaByKey = new Map((response.includes?.media ?? []).map((media) => [media.media_key, media]))
   const includedTweets = new Map((response.includes?.tweets ?? []).map((tweet) => [tweet.id, tweet]))
-  const mapPost = (post: XApiPost, authorFallback: XApiUser, hydrateQuote: boolean): TweetData => {
+  const mapPost = (post: XApiPost, authorFallback: XApiUser, visited: ReadonlySet<string>): TweetData => {
     const author = (post.author_id ? users.get(post.author_id) : undefined) ?? authorFallback
-    const tweet: TweetWithQuoteCount & { wrapperUrls?: string[] } = {
+    const nextVisited = new Set(visited).add(post.id)
+    const repostReference = post.referenced_tweets?.find((item) => item.type === "retweeted")
+    const repostedPost =
+      repostReference && !visited.has(repostReference.id) ? includedTweets.get(repostReference.id) : undefined
+    const repostedAuthor = repostedPost?.author_id ? users.get(repostedPost.author_id) : undefined
+    if (repostedPost && repostedAuthor) {
+      const original = mapPost(repostedPost, repostedAuthor, nextVisited)
+      return withRepostContext(original, post.id, {
+        name: author.name,
+        username: author.username,
+        profileImageUrl: author.profile_image_url,
+      } as TweetData["author"] & { profileImageUrl?: string })
+    }
+
+    const tweet: AppTweetData = {
       id: post.id,
-      text: post.text,
+      text: post.note_tweet?.text ?? post.text,
       author: {
         name: author.name,
         username: author.username,
@@ -654,15 +807,13 @@ function mapOfficialPosts(response: XApiResponse<XApiPost[]>, fallbackAuthor: XA
       media: mapOfficialMedia(post, mediaByKey),
       wrapperUrls: officialWrapperUrls(post),
     }
-    if (hydrateQuote) {
-      const reference = post.referenced_tweets?.find((item) => item.type === "quoted")
-      const quotedPost = reference ? includedTweets.get(reference.id) : undefined
-      const quotedAuthor = quotedPost?.author_id ? users.get(quotedPost.author_id) : undefined
-      if (quotedPost && quotedAuthor) tweet.quotedTweet = mapPost(quotedPost, quotedAuthor, false)
-    }
+    const reference = post.referenced_tweets?.find((item) => item.type === "quoted")
+    const quotedPost = reference && !visited.has(reference.id) ? includedTweets.get(reference.id) : undefined
+    const quotedAuthor = quotedPost?.author_id ? users.get(quotedPost.author_id) : undefined
+    if (quotedPost && quotedAuthor) tweet.quotedTweet = mapPost(quotedPost, quotedAuthor, nextVisited)
     return tweet
   }
-  return posts.map((post) => mapPost(post, fallbackAuthor, true))
+  return posts.map((post) => mapPost(post, fallbackAuthor, new Set()))
 }
 
 async function fetchOfficialTimeline(
@@ -684,7 +835,7 @@ async function fetchOfficialTimeline(
 
   const params = new URLSearchParams({
     max_results: String(PAGE_SIZE),
-    "tweet.fields": "attachments,author_id,created_at,entities,public_metrics,referenced_tweets",
+    "tweet.fields": "attachments,author_id,created_at,entities,note_tweet,public_metrics,referenced_tweets",
     expansions:
       "attachments.media_keys,author_id,referenced_tweets.id,referenced_tweets.id.attachments.media_keys,referenced_tweets.id.author_id",
     "user.fields": "id,name,profile_image_url,username",
@@ -712,7 +863,7 @@ async function fetchOfficialComments(tweetId: string, paginationToken?: string):
     query: `in_reply_to_tweet_id:${tweetId}`,
     sort_order: "recency",
     max_results: String(COMMENTS_PAGE_SIZE),
-    "tweet.fields": "attachments,author_id,created_at,entities,public_metrics,referenced_tweets",
+    "tweet.fields": "attachments,author_id,created_at,entities,note_tweet,public_metrics,referenced_tweets",
     expansions:
       "attachments.media_keys,author_id,referenced_tweets.id,referenced_tweets.id.attachments.media_keys,referenced_tweets.id.author_id",
     "user.fields": "id,name,profile_image_url,username",
@@ -737,7 +888,7 @@ async function fetchCommentsPage(tweetId: string, cursor?: string): Promise<Comm
     includeRaw: true,
   })
   if (!result.success) throw new Error(result.error)
-  return { tweets: result.tweets, nextCursor: result.nextCursor ?? null }
+  return { tweets: normalizeCookieTweets(result.tweets), nextCursor: result.nextCursor ?? null }
 }
 
 function compactCount(value: number | undefined): string {
@@ -1147,6 +1298,26 @@ function postAuthorContent(tweet: TweetData) {
   return t`${bold(fg(COLORS.primary)(tweet.author.name || username))} ${fg(COLORS.secondary)(`@${username}`)} ${fg(COLORS.muted)(timestamp ? `· ${timestamp}` : "")}`
 }
 
+function timelineItemId(tweet: TweetData): string {
+  return (tweet as AppTweetData).timelineItemId ?? tweet.id
+}
+
+function addRepostContext(card: BoxRenderable, tweet: TweetData, postIndex: number, idPrefix: string): void {
+  const context = (tweet as AppTweetData).repostedBy
+  if (!context) return
+  const name = context.author.name || context.author.username
+  card.add(
+    new TextRenderable(card.ctx, {
+      id: `${idPrefix}-repost-${postIndex}`,
+      content: t`${fg(COLORS.secondary)(`↻ ${name} reposted`)}`,
+      width: "100%",
+      height: 1,
+      wrapMode: "none",
+      selectable: false,
+    }),
+  )
+}
+
 function postBodyContent(tweet: TweetData, expanded: boolean = false) {
   const article = tweet.article?.title ? `\nARTICLE · ${tweet.article.title}` : ""
   const preview = postPreview(displayPostText(tweet), expanded)
@@ -1272,7 +1443,7 @@ function viewableImages(tweet: TweetData): TweetMedia[] {
 }
 
 function tweetQuoteCount(tweet: TweetData): number {
-  const direct = (tweet as TweetWithQuoteCount).quoteCount
+  const direct = (tweet as AppTweetData).quoteCount
   const raw = tweet._raw as { legacy?: { quote_count?: unknown } } | undefined
   const value = direct ?? raw?.legacy?.quote_count
   return typeof value === "number" && Number.isFinite(value) ? value : 0
@@ -1869,18 +2040,19 @@ function hideLoadingMoreIndicator(): void {
 function togglePostExpansion(index: number): boolean {
   const tweet = timelineTweets[index]
   if (!tweet || !postPreview(displayPostText(tweet), false).isLong) return false
-  const body = postBodies.get(tweet.id)
-  const toggle = postToggles.get(tweet.id)
+  const itemId = timelineItemId(tweet)
+  const body = postBodies.get(itemId)
+  const toggle = postToggles.get(itemId)
   if (!body || !toggle) return false
 
-  const expanded = !expandedPostIds.has(tweet.id)
-  if (expanded) expandedPostIds.add(tweet.id)
-  else expandedPostIds.delete(tweet.id)
+  const expanded = !expandedPostIds.has(itemId)
+  if (expanded) expandedPostIds.add(itemId)
+  else expandedPostIds.delete(itemId)
   body.content = postBodyContent(tweet, expanded)
   toggle.content = postToggleContent(expanded)
   const currentGeneration = generation
   queueMicrotask(() => {
-    if (currentGeneration === generation && currentView === "timeline") feed?.scrollChildIntoView(`x-post-${tweet.id}`)
+    if (currentGeneration === generation && currentView === "timeline") feed?.scrollChildIntoView(`x-post-${itemId}`)
   })
   return true
 }
@@ -1891,8 +2063,9 @@ function toggleSelectedPostExpansion(): boolean {
 
 function createPostCard(tweet: TweetData, index: number): BoxRenderable | null {
   if (!feed) return null
+  const itemId = timelineItemId(tweet)
   const card = new BoxRenderable(feed.ctx, {
-    id: `x-post-${tweet.id}`,
+    id: `x-post-${itemId}`,
     width: "100%",
     paddingLeft: 1,
     paddingRight: 1,
@@ -1903,20 +2076,21 @@ function createPostCard(tweet: TweetData, index: number): BoxRenderable | null {
     flexShrink: 0,
   })
   makeClickable(card, () => selectPost(index), undefined, false)
+  addRepostContext(card, tweet, index, "x-post")
   addPostAuthor(card, tweet, index)
   const body = new TextRenderable(feed.ctx, {
     id: `x-post-content-${index}`,
-    content: postBodyContent(tweet, expandedPostIds.has(tweet.id)),
+    content: postBodyContent(tweet, expandedPostIds.has(itemId)),
     width: "100%",
     wrapMode: "word",
     selectable: true,
   })
-  postBodies.set(tweet.id, body)
+  postBodies.set(itemId, body)
   card.add(body)
   if (postPreview(displayPostText(tweet), false).isLong) {
     const toggle = new TextRenderable(feed.ctx, {
-      id: `x-post-toggle-${tweet.id}`,
-      content: postToggleContent(expandedPostIds.has(tweet.id)),
+      id: `x-post-toggle-${itemId}`,
+      content: postToggleContent(expandedPostIds.has(itemId)),
       marginTop: 1,
       wrapMode: "none",
       selectable: false,
@@ -1925,7 +2099,7 @@ function createPostCard(tweet: TweetData, index: number): BoxRenderable | null {
       selectPost(index, false)
       return togglePostExpansion(index)
     })
-    postToggles.set(tweet.id, toggle)
+    postToggles.set(itemId, toggle)
     card.add(toggle)
   }
   const openMedia = (mediaTweet: TweetData, media: TweetMedia) => {
@@ -1962,6 +2136,7 @@ function createCommentsPostCard(
     titleColor: isRoot ? COLORS.accent : undefined,
     flexShrink: 0,
   })
+  addRepostContext(card, tweet, index, idPrefix)
   addPostAuthor(card, tweet, index, idPrefix)
   card.add(
     new TextRenderable(destination.ctx, {
@@ -1987,11 +2162,12 @@ function appendTweets(tweets: readonly TweetData[]): number {
   if (!feed) return 0
   let added = 0
   for (const tweet of tweets) {
-    if (timelineTweetIds.has(tweet.id)) continue
+    const itemId = timelineItemId(tweet)
+    if (timelineTweetIds.has(itemId)) continue
     const index = timelineTweets.length
     const card = createPostCard(tweet, index)
     if (!card) continue
-    timelineTweetIds.add(tweet.id)
+    timelineTweetIds.add(itemId)
     timelineTweets.push(tweet)
     cards.push(card)
     feed.add(card)
@@ -3122,7 +3298,7 @@ async function refreshTimeline(): Promise<void> {
           ? await activeClient.getHomeLatestTimeline(PAGE_SIZE, { includeRaw: true })
           : await activeClient.getHomeTimeline(PAGE_SIZE, { includeRaw: true })
       if ("error" in result) throw new Error(result.error)
-      tweets = result.tweets
+      tweets = normalizeCookieTweets(result.tweets)
       officialNextToken = null
       cookieRequestedCount = PAGE_SIZE
       timelineHasMore = result.tweets.length >= PAGE_SIZE
@@ -3213,7 +3389,7 @@ async function loadMoreTimeline(): Promise<void> {
       if (currentGeneration !== generation) return
       if ("error" in result) throw new Error(result.error)
       hideLoadingMoreIndicator()
-      added = appendTweets(result.tweets)
+      added = appendTweets(normalizeCookieTweets(result.tweets))
       cookieRequestedCount = requestedCount
       timelineHasMore = result.tweets.length >= requestedCount && added > 0
     }
