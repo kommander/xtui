@@ -70,12 +70,35 @@ const bindingsKeySchema = z
       .regex(/^(?![eE][sS][cC][aA][pP][eE]$).+/),
   ])
   .describe("The global bindings key: ? or a non-text key/chord; Escape is reserved for closing the dialog.")
-const keybindingShape = Object.fromEntries(
-  Object.entries(DEFAULT_KEYBINDINGS).map(([command, binding]) => [
-    command,
-    (command === "app.bindings" ? bindingsKeySchema : keybindingSchema).meta({ default: binding }),
-  ]),
-) as unknown as Record<XtuiCommandName, z.ZodType<string>>
+const keybindingShape = {
+  "x.feed.next": keybindingSchema.meta({ default: DEFAULT_KEYBINDINGS["x.feed.next"] }),
+  "x.feed.previous": keybindingSchema.meta({ default: DEFAULT_KEYBINDINGS["x.feed.previous"] }),
+  "x.feed.open": keybindingSchema.meta({ default: DEFAULT_KEYBINDINGS["x.feed.open"] }),
+  "x.feed.image": keybindingSchema.meta({ default: DEFAULT_KEYBINDINGS["x.feed.image"] }),
+  "x.feed.comments": keybindingSchema.meta({ default: DEFAULT_KEYBINDINGS["x.feed.comments"] }),
+  "x.feed.refresh": keybindingSchema.meta({ default: DEFAULT_KEYBINDINGS["x.feed.refresh"] }),
+  "x.feed.toggle-expanded": keybindingSchema.meta({ default: DEFAULT_KEYBINDINGS["x.feed.toggle-expanded"] }),
+  "x.feed.switch-stream": keybindingSchema.meta({ default: DEFAULT_KEYBINDINGS["x.feed.switch-stream"] }),
+  "x.session.open": keybindingSchema.meta({ default: DEFAULT_KEYBINDINGS["x.session.open"] }),
+  "x.comments.next": keybindingSchema.meta({ default: DEFAULT_KEYBINDINGS["x.comments.next"] }),
+  "x.comments.previous": keybindingSchema.meta({ default: DEFAULT_KEYBINDINGS["x.comments.previous"] }),
+  "x.comments.open": keybindingSchema.meta({ default: DEFAULT_KEYBINDINGS["x.comments.open"] }),
+  "x.comments.image": keybindingSchema.meta({ default: DEFAULT_KEYBINDINGS["x.comments.image"] }),
+  "x.comments.back": keybindingSchema.meta({ default: DEFAULT_KEYBINDINGS["x.comments.back"] }),
+  "x.image.next": keybindingSchema.meta({ default: DEFAULT_KEYBINDINGS["x.image.next"] }),
+  "x.image.previous": keybindingSchema.meta({ default: DEFAULT_KEYBINDINGS["x.image.previous"] }),
+  "x.image.zoom-in": keybindingSchema.meta({ default: DEFAULT_KEYBINDINGS["x.image.zoom-in"] }),
+  "x.image.zoom-out": keybindingSchema.meta({ default: DEFAULT_KEYBINDINGS["x.image.zoom-out"] }),
+  "x.image.pan-left": keybindingSchema.meta({ default: DEFAULT_KEYBINDINGS["x.image.pan-left"] }),
+  "x.image.pan-down": keybindingSchema.meta({ default: DEFAULT_KEYBINDINGS["x.image.pan-down"] }),
+  "x.image.pan-up": keybindingSchema.meta({ default: DEFAULT_KEYBINDINGS["x.image.pan-up"] }),
+  "x.image.pan-right": keybindingSchema.meta({ default: DEFAULT_KEYBINDINGS["x.image.pan-right"] }),
+  "x.image.close": keybindingSchema.meta({ default: DEFAULT_KEYBINDINGS["x.image.close"] }),
+  "x.modal.back": keybindingSchema.meta({ default: DEFAULT_KEYBINDINGS["x.modal.back"] }),
+  "app.bindings": bindingsKeySchema.meta({ default: DEFAULT_KEYBINDINGS["app.bindings"] }),
+  "app.console": keybindingSchema.meta({ default: DEFAULT_KEYBINDINGS["app.console"] }),
+  "app.quit": keybindingSchema.meta({ default: DEFAULT_KEYBINDINGS["app.quit"] }),
+} satisfies Record<XtuiCommandName, z.ZodType<string>>
 
 export const xtuiConfigFileSchema = z
   .strictObject({
