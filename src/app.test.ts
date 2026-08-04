@@ -280,8 +280,8 @@ async function waitForApiFrame(
 ): Promise<string> {
   await app.api.waitForRequestCount(requestCount)
   await app.api.waitForResponseCount(requestCount)
-  for (let attempt = 0; attempt < 20; attempt += 1) {
-    await new Promise<void>((resolve) => setImmediate(resolve))
+  for (let attempt = 0; attempt < 100; attempt += 1) {
+    await Bun.sleep(1)
     await app.setup.renderOnce()
     const frame = app.setup.captureCharFrame()
     if (predicate(frame)) return frame
