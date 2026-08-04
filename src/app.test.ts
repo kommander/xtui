@@ -15,6 +15,7 @@ import { createTestRenderer, MouseButtons, TestRecorder, type TestRendererSetup 
 import { TwitterClient, type TweetData } from "@steipete/bird"
 import { mkdtempSync, rmSync } from "node:fs"
 import { join } from "node:path"
+import { DEFAULT_KEYBINDINGS } from "./config.js"
 import { destroy, run, type XDemoRunOptions } from "./index.js"
 
 const TIMELINE_QUERY = {
@@ -396,6 +397,8 @@ describe("xtui application", () => {
       const frame = await app.setup.waitForFrame((value) => value.includes("CONNECT X"))
       expect(frame).toContain("CTRL+C quit")
       expect(frame).not.toContain("ESC back")
+      expect(getScrollBox(app, "x-feed").verticalScrollBar.visible).toBe(false)
+      expect(getScrollBox(app, "x-comments-feed").verticalScrollBar.visible).toBe(false)
 
       app.setup.mockInput.pressKey("q")
       app.setup.mockInput.pressEscape()
@@ -406,6 +409,57 @@ describe("xtui application", () => {
       expect(app.setup.renderer.isDestroyed).toBe(true)
       app.api.assertDone()
       expectHealthy(app)
+    } finally {
+      await app.close()
+    }
+  })
+
+  test("applies configured keybindings and scrollbars", async () => {
+    const app = await createApp(18, {
+      config: {
+        scrollbar: true,
+        keybindings: {
+          ...DEFAULT_KEYBINDINGS,
+          "x.feed.next": "n",
+          "x.feed.previous": "ctrl+",
+          "app.quit": "q",
+        },
+      },
+    })
+    app.api.expectUser("config-q`-token", { body: { data: { id: "42", name: "Reader", username: "reader" } } })
+    app.api.expectTimeline("config-q`-token", "42", {
+      body: {
+        data: [
+          { id: "101", text: "First configured post" },
+          { id: "102", text: "Second configured post" },
+        ],
+      },
+    })
+
+    try {
+      expect((app.setup.renderer.console as unknown as { isVisible: boolean }).isVisible).toBe(true)
+      app.setup.mockInput.pressKey("`")
+      expect((app.setup.renderer.console as unknown as { isVisible: boolean }).isVisible).toBe(false)
+      await loginOfficial(app, "config-q`-token")
+      const frame = await waitForApiFrame(app, 2, (value) => value.includes("Second configured post"))
+      expect(frame).toContain("N/K select")
+      expect(getScrollBox(app, "x-feed").verticalScrollBar.visible).toBe(true)
+      expect(getScrollBox(app, "x-comments-feed").verticalScrollBar.visible).toBe(true)
+
+      app.setup.mockInput.pressKey("j")
+      await app.setup.renderOnce()
+      expect(getCard(app, "101").backgroundColor.toInts()).toEqual([22, 24, 28, 255])
+      app.setup.mockInput.pressKey("n")
+      await app.setup.renderOnce()
+      expect(getCard(app, "102").backgroundColor.toInts()).toEqual([22, 24, 28, 255])
+      app.setup.mockInput.pressKey("k")
+      await app.setup.renderOnce()
+      expect(getCard(app, "101").backgroundColor.toInts()).toEqual([22, 24, 28, 255])
+
+      app.api.assertDone()
+      expectHealthy(app)
+      app.setup.mockInput.pressKey("q")
+      expect(app.setup.renderer.isDestroyed).toBe(true)
     } finally {
       await app.close()
     }
@@ -1268,7 +1322,7 @@ describe("xtui application", () => {
       const narrowGrid = descendant("x-post-media-1")
       const narrowFirst = descendant("x-post-media-tile-1-0")
       const narrowSecond = descendant("x-post-media-tile-1-1")
-      expect(narrowSecond.screenX - narrowFirst.screenX - narrowFirst.width).toBe(0)
+      expect(narrowSecond.screenX - narrowFirst.screenX - narrowFirst.width).toBe(1)
       expect(narrowSecond.screenX + narrowSecond.width).toBeLessThanOrEqual(narrowGrid.screenX + narrowGrid.width)
 
       app.api.assertDone()

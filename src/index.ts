@@ -48,6 +48,15 @@ import { existsSync, readdirSync } from "node:fs"
 import { homedir } from "node:os"
 import { isAbsolute, join } from "node:path"
 import { loadRememberedBrowserSource, rememberBrowserSource, type BrowserSourceId } from "./browser-preference.js"
+import {
+  DEFAULT_CONFIG,
+  DEFAULT_KEYBINDINGS,
+  formatConfigIssue,
+  loadConfig,
+  type ConfigIssue,
+  type XtuiCommandName,
+  type XtuiConfig,
+} from "./config.js"
 
 export type { BrowserSourceId } from "./browser-preference.js"
 
@@ -87,41 +96,36 @@ const IMAGE_CHROME_ROWS = 2
 const POST_PREVIEW_GRAPHEMES = 280
 const X_API_BASE_URL = "https://api.x.com"
 const COMMENTS_PAGE_SIZE = 100
-const FEED_BINDINGS = {
-  "x.feed.next": "j",
-  "x.feed.previous": "k",
-  "x.feed.open": "o",
-  "x.feed.image": "i",
-  "x.feed.comments": "c",
-  "x.feed.refresh": "r",
-  "x.feed.toggle-expanded": "e",
-  "x.feed.switch-stream": "tab",
-  "x.session.open": "a",
-} as const
-const COMMENTS_BINDINGS = {
-  "x.comments.next": "j",
-  "x.comments.previous": "k",
-  "x.comments.open": "o",
-  "x.comments.image": "i",
-  "x.comments.back": "escape",
-} as const
-const IMAGE_BINDINGS = {
-  "x.image.next": "right",
-  "x.image.previous": "left",
-  "x.image.zoom-in": "+",
-  "x.image.zoom-out": "-",
-  "x.image.pan-left": "h",
-  "x.image.pan-down": "j",
-  "x.image.pan-up": "k",
-  "x.image.pan-right": "l",
-  "x.image.close": "escape",
-} as const
-const APP_BINDINGS = {
-  "app.quit": "ctrl+c",
-} as const
-const VIEW_BINDINGS = {
-  "app.console": "`",
-} as const
+const FEED_COMMANDS = [
+  "x.feed.next",
+  "x.feed.previous",
+  "x.feed.open",
+  "x.feed.image",
+  "x.feed.comments",
+  "x.feed.refresh",
+  "x.feed.toggle-expanded",
+  "x.feed.switch-stream",
+  "x.session.open",
+] as const satisfies readonly XtuiCommandName[]
+const COMMENTS_COMMANDS = [
+  "x.comments.next",
+  "x.comments.previous",
+  "x.comments.open",
+  "x.comments.image",
+  "x.comments.back",
+] as const satisfies readonly XtuiCommandName[]
+const IMAGE_COMMANDS = [
+  "x.image.next",
+  "x.image.previous",
+  "x.image.zoom-in",
+  "x.image.zoom-out",
+  "x.image.pan-left",
+  "x.image.pan-down",
+  "x.image.pan-up",
+  "x.image.pan-right",
+  "x.image.close",
+] as const satisfies readonly XtuiCommandName[]
+const APP_COMMANDS = ["app.quit", "app.console"] as const satisfies readonly XtuiCommandName[]
 
 interface CookieSource {
   id: BrowserSourceId
@@ -137,6 +141,8 @@ export interface XDemoRunOptions {
   xApiBaseUrl?: string
   twitterClientFactory?: (options: ConstructorParameters<typeof TwitterClient>[0]) => TwitterClient
   openUrl?: (url: string) => Promise<void>
+  config?: XtuiConfig
+  configPath?: string
 }
 
 function safeDirectories(root: string): string[] {
@@ -481,6 +487,7 @@ const rendererKeymaps = new WeakMap<CliRenderer, Keymap<Renderable, KeyEvent>>()
 
 let root: BoxRenderable | null = null
 let currentRenderer: CliRenderer | null = null
+let activeConfig: XtuiConfig = DEFAULT_CONFIG
 let feed: ScrollBoxRenderable | null = null
 let commentsFeed: ScrollBoxRenderable | null = null
 let statusText: TextRenderable | null = null
@@ -946,33 +953,13 @@ function formatKeyLabel(key: string): string {
   return (activeKeymap?.formatKey(key, { preferDisplay: true }) ?? key).toUpperCase()
 }
 
-type CommandName =
-  | keyof typeof FEED_BINDINGS
-  | keyof typeof COMMENTS_BINDINGS
-  | keyof typeof IMAGE_BINDINGS
-  | keyof typeof APP_BINDINGS
-  | keyof typeof VIEW_BINDINGS
-  | "x.modal.back"
-
-function formatCommandKey(command: CommandName): string {
+function formatCommandKey(command: XtuiCommandName): string {
   const bindings = activeKeymap?.getCommandBindings({ visibility: "registered", commands: [command] }).get(command)
-  const fallback =
-    command === "x.modal.back"
-      ? "esc"
-      : command in FEED_BINDINGS
-        ? FEED_BINDINGS[command as keyof typeof FEED_BINDINGS]
-        : command in COMMENTS_BINDINGS
-          ? COMMENTS_BINDINGS[command as keyof typeof COMMENTS_BINDINGS]
-          : command in IMAGE_BINDINGS
-            ? IMAGE_BINDINGS[command as keyof typeof IMAGE_BINDINGS]
-            : command in APP_BINDINGS
-              ? APP_BINDINGS[command as keyof typeof APP_BINDINGS]
-              : VIEW_BINDINGS[command as keyof typeof VIEW_BINDINGS]
   return (
     formatCommandBindings(bindings, {
       keyNameAliases: { escape: "esc" },
       bindingSeparator: "/",
-    }) ?? fallback
+    }) ?? activeConfig.keybindings[command]
   ).toUpperCase()
 }
 
@@ -1518,7 +1505,10 @@ function updateImageViewText(): void {
   if (!imageTweet || !imageHeaderText || !imageMetricsText) return
   const position = imageItems.length > 1 ? `${imageIndex + 1}/${imageItems.length} · ` : ""
   const status = imageMessage ? ` · ${imageMessage}` : ""
-  imageHeaderText.content = t`${bold(fg(COLORS.primary)(`IMAGE · ${position}${Math.round(imageZoom * 100)}%`))}${fg(COLORS.secondary)(`   ${formatCommandKey("x.image.previous")}/${formatCommandKey("x.image.next")} image   ${formatCommandKey("x.image.zoom-in")}/${formatCommandKey("x.image.zoom-out")} zoom   H/J/K/L pan   ${formatCommandKey("x.image.close")} back${status}`)}`
+  const panKeys = ["x.image.pan-left", "x.image.pan-down", "x.image.pan-up", "x.image.pan-right"]
+    .map((command) => formatCommandKey(command as XtuiCommandName))
+    .join("/")
+  imageHeaderText.content = t`${bold(fg(COLORS.primary)(`IMAGE · ${position}${Math.round(imageZoom * 100)}%`))}${fg(COLORS.secondary)(`   ${formatCommandKey("x.image.previous")}/${formatCommandKey("x.image.next")} image   ${formatCommandKey("x.image.zoom-in")}/${formatCommandKey("x.image.zoom-out")} zoom   ${panKeys} pan   ${formatCommandKey("x.image.close")} back${status}`)}`
   imageMetricsText.content = t`${fg(COLORS.secondary)(`${compactCount(imageTweet.replyCount)} replies   ${compactCount(tweetQuoteCount(imageTweet))} quotes   ${compactCount(imageTweet.likeCount)} likes`)}`
 }
 
@@ -3087,27 +3077,59 @@ function getRendererKeymap(renderer: CliRenderer): Keymap<Renderable, KeyEvent> 
   return keymap
 }
 
-function registerXKeymap(renderer: CliRenderer): Keymap<Renderable, KeyEvent> {
+function configuredBindings(commands: readonly XtuiCommandName[]): Record<string, string> {
+  return Object.fromEntries(commands.map((command) => [command, activeConfig.keybindings[command]]))
+}
+
+function isUnmodifiedTextInput(event: KeyEvent): boolean {
+  return (
+    currentRenderer?.currentFocusedRenderable instanceof InputRenderable &&
+    !event.ctrl &&
+    !event.meta &&
+    !event.super &&
+    !event.hyper &&
+    (event.name.length === 1 || event.name === "space")
+  )
+}
+
+function registerXKeymap(renderer: CliRenderer): ConfigIssue[] {
   const keymap = getRendererKeymap(renderer)
   activeKeymap = keymap
+  const configIssues: ConfigIssue[] = []
+  for (const command of Object.keys(DEFAULT_KEYBINDINGS) as XtuiCommandName[]) {
+    try {
+      const sequence = keymap.parseKeySequence(activeConfig.keybindings[command])
+      if (sequence.length !== 1) throw new Error("Expected one key stroke")
+    } catch (error) {
+      const fallback = DEFAULT_KEYBINDINGS[command]
+      configIssues.push({
+        path: `/keybindings/${command}`,
+        message: `${error instanceof Error ? error.message : String(error)}; using default ${JSON.stringify(fallback)}`,
+      })
+      activeConfig.keybindings[command] = fallback
+    }
+  }
   keymapDisposers.push(
     keymap.registerLayer({
       commands: [
         {
           name: "x.modal.back",
-          run() {
+          run({ event }) {
+            if (isUnmodifiedTextInput(event)) return false
             return popModalRoute()
           },
         },
         {
           name: "app.quit",
-          run() {
+          run({ event }) {
+            if (isUnmodifiedTextInput(event)) return false
             quitApplication()
           },
         },
         {
           name: "app.console",
-          run() {
+          run({ event }) {
+            if (isUnmodifiedTextInput(event)) return false
             toggleConsole()
           },
         },
@@ -3256,10 +3278,10 @@ function registerXKeymap(renderer: CliRenderer): Keymap<Renderable, KeyEvent> {
     keymap.registerLayer({
       priority: 10_000,
       enabled: canPopModalRoute,
-      bindings: commandBindings({ "x.modal.back": "escape" }),
+      bindings: commandBindings(configuredBindings(["x.modal.back"])),
     }),
     keymap.registerLayer({
-      bindings: commandBindings(APP_BINDINGS),
+      bindings: commandBindings(configuredBindings(APP_COMMANDS)),
     }),
   )
 
@@ -3268,7 +3290,7 @@ function registerXKeymap(renderer: CliRenderer): Keymap<Renderable, KeyEvent> {
       keymap.registerLayer({
         target: state.feed,
         targetMode: "focus",
-        bindings: commandBindings({ ...FEED_BINDINGS, ...VIEW_BINDINGS }),
+        bindings: commandBindings(configuredBindings(FEED_COMMANDS)),
       }),
     )
   }
@@ -3278,7 +3300,7 @@ function registerXKeymap(renderer: CliRenderer): Keymap<Renderable, KeyEvent> {
       keymap.registerLayer({
         target: commentsFeed,
         targetMode: "focus",
-        bindings: commandBindings({ ...COMMENTS_BINDINGS, ...VIEW_BINDINGS }),
+        bindings: commandBindings(configuredBindings(COMMENTS_COMMANDS)),
       }),
     )
   }
@@ -3288,12 +3310,12 @@ function registerXKeymap(renderer: CliRenderer): Keymap<Renderable, KeyEvent> {
       keymap.registerLayer({
         target: imageOverlay,
         targetMode: "focus",
-        bindings: commandBindings(IMAGE_BINDINGS),
+        bindings: commandBindings(configuredBindings(IMAGE_COMMANDS)),
       }),
     )
   }
 
-  return keymap
+  return configIssues
 }
 
 async function refreshTimeline(
@@ -3632,7 +3654,7 @@ function scheduleCommentsCheck(): void {
 }
 
 function createMainScrollBox(renderer: CliRenderer, id: string, zIndex: number): ScrollBoxRenderable {
-  return new ScrollBoxRenderable(renderer, {
+  const scrollBox = new ScrollBoxRenderable(renderer, {
     id,
     position: "absolute",
     left: 0,
@@ -3656,6 +3678,8 @@ function createMainScrollBox(renderer: CliRenderer, id: string, zIndex: number):
       },
     },
   })
+  scrollBox.verticalScrollBar.visible = activeConfig.scrollbar
+  return scrollBox
 }
 
 function createTimelineStreamState(renderer: CliRenderer, stream: TimelineStream): TimelineStreamState {
@@ -3719,6 +3743,10 @@ function activateTimelineStream(stream: TimelineStream, focus: boolean = true): 
 export function run(renderer: CliRenderer, options: XDemoRunOptions = {}): void {
   generation += 1
   currentRenderer = renderer
+  activeConfig = {
+    scrollbar: options.config?.scrollbar ?? DEFAULT_CONFIG.scrollbar,
+    keybindings: { ...DEFAULT_KEYBINDINGS, ...options.config?.keybindings },
+  }
   renderer.once(CliRenderEvents.DESTROY, () => {
     if (currentRenderer === renderer) destroy()
   })
@@ -3857,7 +3885,7 @@ export function run(renderer: CliRenderer, options: XDemoRunOptions = {}): void 
   commentsScrollListener = loadCommentsNearBottom
   commentsFeed.verticalScrollBar.on("change", commentsScrollListener)
   const imageView = createImageView(renderer)
-  registerXKeymap(renderer)
+  const keybindingIssues = registerXKeymap(renderer)
   updateHeader()
 
   footer = new BoxRenderable(renderer, {
@@ -3918,6 +3946,10 @@ export function run(renderer: CliRenderer, options: XDemoRunOptions = {}): void 
   else {
     setStatus("Waiting for a session...", COLORS.muted)
     openConnectionFlow(false)
+  }
+  if (keybindingIssues.length > 0) {
+    for (const issue of keybindingIssues) console.error(formatConfigIssue(options.configPath ?? "configuration", issue))
+    renderer.console.show()
   }
 }
 
@@ -3989,13 +4021,18 @@ export function destroy(): void {
 }
 
 if (import.meta.main) {
+  const configResult = loadConfig()
   const renderer = await createCliRenderer({
     exitOnCtrlC: false,
     targetFps: 30,
     consoleOptions: { position: ConsolePosition.TOP },
   })
   try {
-    run(renderer)
+    run(renderer, { config: configResult.config, configPath: configResult.path })
+    if (configResult.issues.length > 0) {
+      for (const issue of configResult.issues) console.error(formatConfigIssue(configResult.path, issue))
+      renderer.console.show()
+    }
   } catch (error) {
     renderer.destroy()
     throw error

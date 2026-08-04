@@ -1,0 +1,180 @@
+{
+  "$id": "https://raw.githubusercontent.com/kommander/xtui/main/xtui.schema.json",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object",
+  "properties": {
+    "$schema": {
+      "type": "string"
+    },
+    "scrollbar": {
+      "description": "Show vertical scrollbars in timelines and comments.",
+      "default": false,
+      "type": "boolean"
+    },
+    "keybindings": {
+      "description": "Application command keybindings.",
+      "type": "object",
+      "properties": {
+        "x.feed.next": {
+          "type": "string",
+          "minLength": 1,
+          "description": "A single OpenTUI key stroke, such as j, escape, or ctrl+c.",
+          "default": "j"
+        },
+        "x.feed.previous": {
+          "type": "string",
+          "minLength": 1,
+          "description": "A single OpenTUI key stroke, such as j, escape, or ctrl+c.",
+          "default": "k"
+        },
+        "x.feed.open": {
+          "type": "string",
+          "minLength": 1,
+          "description": "A single OpenTUI key stroke, such as j, escape, or ctrl+c.",
+          "default": "o"
+        },
+        "x.feed.image": {
+          "type": "string",
+          "minLength": 1,
+          "description": "A single OpenTUI key stroke, such as j, escape, or ctrl+c.",
+          "default": "i"
+        },
+        "x.feed.comments": {
+          "type": "string",
+          "minLength": 1,
+          "description": "A single OpenTUI key stroke, such as j, escape, or ctrl+c.",
+          "default": "c"
+        },
+        "x.feed.refresh": {
+          "type": "string",
+          "minLength": 1,
+          "description": "A single OpenTUI key stroke, such as j, escape, or ctrl+c.",
+          "default": "r"
+        },
+        "x.feed.toggle-expanded": {
+          "type": "string",
+          "minLength": 1,
+          "description": "A single OpenTUI key stroke, such as j, escape, or ctrl+c.",
+          "default": "e"
+        },
+        "x.feed.switch-stream": {
+          "type": "string",
+          "minLength": 1,
+          "description": "A single OpenTUI key stroke, such as j, escape, or ctrl+c.",
+          "default": "tab"
+        },
+        "x.session.open": {
+          "type": "string",
+          "minLength": 1,
+          "description": "A single OpenTUI key stroke, such as j, escape, or ctrl+c.",
+          "default": "a"
+        },
+        "x.comments.next": {
+          "type": "string",
+          "minLength": 1,
+          "description": "A single OpenTUI key stroke, such as j, escape, or ctrl+c.",
+          "default": "j"
+        },
+        "x.comments.previous": {
+          "type": "string",
+          "minLength": 1,
+          "description": "A single OpenTUI key stroke, such as j, escape, or ctrl+c.",
+          "default": "k"
+        },
+        "x.comments.open": {
+          "type": "string",
+          "minLength": 1,
+          "description": "A single OpenTUI key stroke, such as j, escape, or ctrl+c.",
+          "default": "o"
+        },
+        "x.comments.image": {
+          "type": "string",
+          "minLength": 1,
+          "description": "A single OpenTUI key stroke, such as j, escape, or ctrl+c.",
+          "default": "i"
+        },
+        "x.comments.back": {
+          "type": "string",
+          "minLength": 1,
+          "description": "A single OpenTUI key stroke, such as j, escape, or ctrl+c.",
+          "default": "escape"
+        },
+        "x.image.next": {
+          "type": "string",
+          "minLength": 1,
+          "description": "A single OpenTUI key stroke, such as j, escape, or ctrl+c.",
+          "default": "right"
+        },
+        "x.image.previous": {
+          "type": "string",
+          "minLength": 1,
+          "description": "A single OpenTUI key stroke, such as j, escape, or ctrl+c.",
+          "default": "left"
+        },
+        "x.image.zoom-in": {
+          "type": "string",
+          "minLength": 1,
+          "description": "A single OpenTUI key stroke, such as j, escape, or ctrl+c.",
+          "default": "+"
+        },
+        "x.image.zoom-out": {
+          "type": "string",
+          "minLength": 1,
+          "description": "A single OpenTUI key stroke, such as j, escape, or ctrl+c.",
+          "default": "-"
+        },
+        "x.image.pan-left": {
+          "type": "string",
+          "minLength": 1,
+          "description": "A single OpenTUI key stroke, such as j, escape, or ctrl+c.",
+          "default": "h"
+        },
+        "x.image.pan-down": {
+          "type": "string",
+          "minLength": 1,
+          "description": "A single OpenTUI key stroke, such as j, escape, or ctrl+c.",
+          "default": "j"
+        },
+        "x.image.pan-up": {
+          "type": "string",
+          "minLength": 1,
+          "description": "A single OpenTUI key stroke, such as j, escape, or ctrl+c.",
+          "default": "k"
+        },
+        "x.image.pan-right": {
+          "type": "string",
+          "minLength": 1,
+          "description": "A single OpenTUI key stroke, such as j, escape, or ctrl+c.",
+          "default": "l"
+        },
+        "x.image.close": {
+          "type": "string",
+          "minLength": 1,
+          "description": "A single OpenTUI key stroke, such as j, escape, or ctrl+c.",
+          "default": "escape"
+        },
+        "x.modal.back": {
+          "type": "string",
+          "minLength": 1,
+          "description": "A single OpenTUI key stroke, such as j, escape, or ctrl+c.",
+          "default": "escape"
+        },
+        "app.console": {
+          "type": "string",
+          "minLength": 1,
+          "description": "A single OpenTUI key stroke, such as j, escape, or ctrl+c.",
+          "default": "`"
+        },
+        "app.quit": {
+          "type": "string",
+          "minLength": 1,
+          "description": "A single OpenTUI key stroke, such as j, escape, or ctrl+c.",
+          "default": "ctrl+c"
+        }
+      },
+      "additionalProperties": false
+    }
+  },
+  "additionalProperties": false,
+  "description": "xtui user configuration"
+}

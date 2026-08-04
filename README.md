@@ -69,9 +69,64 @@ After you choose a browser, xtui remembers only that browser's ID and tries its 
 
 In the image view, use `Left` / `Right` to move between images, `+` / `-` to zoom, `H` / `J` / `K` / `L` to pan, and `Escape` to return.
 
-With a mouse, click posts or comments to select them, click an image to open it, click visible action labels and Show More/Less links, and use the wheel or scrollbar to scroll. Opening a selected post or comment on x.com remains keyboard-only with `O`.
+With a mouse, click posts or comments to select them, click an image to open it, click visible action labels and Show More/Less links, and use the wheel or an enabled scrollbar to scroll. Opening a selected post or comment on x.com remains keyboard-only with `O`.
 
 Image failures are logged to OpenTUI's console with sanitized URLs, post/media context, error code, HTTP status, cause, and stack. Press backtick to inspect them.
+
+## Configuration
+
+xtui reads one optional JSONC file. JSON is also supported because it is a subset of JSONC.
+
+- macOS and Linux: `$XDG_CONFIG_HOME/xtui/config.jsonc`, or `~/.config/xtui/config.jsonc` when `XDG_CONFIG_HOME` is unset or relative
+- Windows: `%APPDATA%\xtui\config.jsonc`, falling back to `~/.config/xtui/config.jsonc`
+
+There are no project-local files or merged configuration layers. Unknown or invalid fields are ignored independently, valid sibling fields still apply, and defaults are used for anything rejected. xtui logs each problem and opens OpenTUI's console automatically.
+
+```jsonc
+{
+  "$schema": "https://raw.githubusercontent.com/kommander/xtui/main/xtui.schema.json",
+  // Hidden by default. Scrolling still works with keys and the mouse wheel.
+  "scrollbar": true,
+  "keybindings": {
+    "x.feed.next": "down",
+    "x.feed.previous": "up",
+    "app.quit": "q",
+  },
+}
+```
+
+Every application command can be rebound to one OpenTUI key stroke. Single keys and modifier chords such as `ctrl+q` are supported; multi-stroke sequences are rejected with a fallback to that command's default.
+
+| Command                  | Default  |
+| ------------------------ | -------- |
+| `x.feed.next`            | `j`      |
+| `x.feed.previous`        | `k`      |
+| `x.feed.open`            | `o`      |
+| `x.feed.image`           | `i`      |
+| `x.feed.comments`        | `c`      |
+| `x.feed.refresh`         | `r`      |
+| `x.feed.toggle-expanded` | `e`      |
+| `x.feed.switch-stream`   | `tab`    |
+| `x.session.open`         | `a`      |
+| `x.comments.next`        | `j`      |
+| `x.comments.previous`    | `k`      |
+| `x.comments.open`        | `o`      |
+| `x.comments.image`       | `i`      |
+| `x.comments.back`        | `escape` |
+| `x.image.next`           | `right`  |
+| `x.image.previous`       | `left`   |
+| `x.image.zoom-in`        | `+`      |
+| `x.image.zoom-out`       | `-`      |
+| `x.image.pan-left`       | `h`      |
+| `x.image.pan-down`       | `j`      |
+| `x.image.pan-up`         | `k`      |
+| `x.image.pan-right`      | `l`      |
+| `x.image.close`          | `escape` |
+| `x.modal.back`           | `escape` |
+| `app.console`            | `` ` ``  |
+| `app.quit`               | `ctrl+c` |
+
+Run `bun run schema` after changing the runtime schema to regenerate `xtui.schema.json`.
 
 ## Build
 
