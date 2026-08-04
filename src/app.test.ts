@@ -288,6 +288,16 @@ async function loginOfficial(app: AppHarness, token: string = "test-token"): Pro
   app.setup.mockInput.pressEnter()
 }
 
+async function loginCookie(app: AppHarness, session: string = "auth_token=test-auth; ct0=test-csrf"): Promise<void> {
+  await clickSelectOption(app, "x-connection-select", 1)
+  await app.setup.waitForFrame((frame) => frame.includes("ACCOUNT RISK"))
+  await clickSelectOption(app, "x-cookie-risk-select", 1)
+  await app.setup.waitForFrame((frame) => frame.includes("Use a session token or your browser login"))
+  await clickRenderable(app, "x-auth-input-box")
+  await app.setup.mockInput.typeText(session)
+  await clickRenderable(app, "x-auth-hint-submit")
+}
+
 async function waitForApiFrame(
   app: AppHarness,
   requestCount: number,
@@ -783,12 +793,12 @@ describe("xtui application", () => {
 
       for (let index = 0; index < 15; index += 1) app.setup.mockInput.pressKey("j")
       await pageRequested.promise
-      const loadingFrame = await app.setup.waitForFrame((frame) => frame.includes("LOADING MORE POSTS"))
-      expect(loadingFrame).toContain("Loading more posts...")
+      const loadingFrame = await app.setup.waitForFrame((frame) => frame.includes("Loading more Following posts"))
+      expect(loadingFrame).toContain("Loading more Following posts...")
 
       releasePage.resolve()
       const completedFrame = await waitForApiFrame(app, 3, (frame) => frame.includes("21 posts · end of timeline"))
-      expect(completedFrame).not.toContain("LOADING MORE POSTS")
+      expect(completedFrame).not.toContain("Loading more Following posts")
       expect(app.setup.renderer.root.findDescendantById("x-post-21")).toBeDefined()
       expect(countPostCards(app.setup.renderer.root)).toBe(21)
 
@@ -800,6 +810,37 @@ describe("xtui application", () => {
       expectHealthy(app)
     } finally {
       releasePage.resolve()
+      await app.close()
+    }
+  })
+
+  test("stops automatic pagination after a load-more error", async () => {
+    const app = await createApp(12)
+    app.api.expectUser("page-error-token", { body: { data: { id: "42", name: "Reader", username: "reader" } } })
+    app.api.expectTimeline("page-error-token", "42", {
+      body: { data: posts(1, 20), meta: { next_token: "broken-page" } },
+    })
+    app.api.expectTimeline(
+      "page-error-token",
+      "42",
+      { status: 500, body: { errors: [{ detail: "Page unavailable" }] } },
+      "broken-page",
+    )
+
+    try {
+      await app.setup.waitForFrame((frame) => frame.includes("CONNECT X"))
+      await loginOfficial(app, "page-error-token")
+      await waitForApiFrame(app, 2, (frame) => frame.includes("Post 1"))
+      for (let index = 0; index < 15; index += 1) app.setup.mockInput.pressKey("j")
+      const errorFrame = await waitForApiFrame(app, 3, (frame) => frame.includes("Could not load more posts"))
+      expect(errorFrame).toContain("Page unavailable")
+      expect(app.setup.renderer.root.findDescendantById("x-activity-spinner")?.visible).toBe(false)
+
+      for (let index = 0; index < 10; index += 1) await app.setup.renderOnce()
+      expect(app.api.requests).toHaveLength(3)
+      app.api.assertDone()
+      expectHealthy(app)
+    } finally {
       await app.close()
     }
   })
@@ -828,7 +869,7 @@ describe("xtui application", () => {
       const y = feed.viewport.screenY + Math.floor(feed.viewport.height / 2)
       const initialScrollTop = feed.scrollTop
 
-      for (let index = 0; index < 50 && app.api.requests.length < 3; index += 1) {
+      for (let index = 0; index < feed.scrollHeight && app.api.requests.length < 3; index += 1) {
         await app.setup.mockMouse.scroll(x, y, "down")
         await app.setup.renderOnce()
       }
@@ -1068,7 +1109,7 @@ describe("xtui application", () => {
       expect(app.setup.renderer.root.findDescendantById("x-image-view")?.visible).toBe(false)
 
       await commentsRequested.promise
-      await app.setup.waitForFrame((frame) => frame.includes("COMMENTS  DIRECT REPLIES"))
+      await app.setup.waitForFrame((frame) => frame.includes("X  COMMENTS"))
       expect(app.setup.renderer.currentFocusedRenderable?.id).toBe("x-comments-feed")
       app.setup.mockInput.pressKey("i")
       await app.setup.waitForFrame((frame) => frame.includes("IMAGE · 100%"))
@@ -1487,7 +1528,7 @@ describe("xtui application", () => {
       expect(followingCalls).toBe(1)
       await clickRenderable(app, "x-header-home")
       await app.setup.waitForFrame((frame) => frame.includes("Browser timeline post"))
-      expect(homeCalls).toBe(2)
+      expect(homeCalls).toBe(1)
 
       await clickRenderable(app, "x-footer-comments")
       for (let attempt = 0; attempt < 20 && repliesCalls.length < 2; attempt += 1) {
@@ -1518,6 +1559,118 @@ describe("xtui application", () => {
       app.api.assertDone()
       expectHealthy(app)
     } finally {
+      await app.close()
+    }
+  })
+
+  test("caches Home and Following independently while loading both", async () => {
+    const homeRequested = deferred<void>()
+    const followingRequested = deferred<void>()
+    const releaseHome = deferred<void>()
+    const releaseFollowing = deferred<void>()
+    const homeFinished = deferred<void>()
+    const followingFinished = deferred<void>()
+    let homeCalls = 0
+    let followingCalls = 0
+    const browserPosts = (start: number) =>
+      Array.from(
+        { length: 12 },
+        (_, index): TweetData => ({
+          id: String(start + index),
+          text: index === 0 ? `Post ${start + index} ${"long ".repeat(70)}` : `Post ${start + index}`,
+          author: { name: "Reader", username: "reader" },
+        }),
+      )
+    const fakeClient = {
+      async getHomeTimeline() {
+        homeCalls += 1
+        homeRequested.resolve()
+        await releaseHome.promise
+        homeFinished.resolve()
+        return { tweets: browserPosts(1) }
+      },
+      async getHomeLatestTimeline() {
+        followingCalls += 1
+        followingRequested.resolve()
+        await releaseFollowing.promise
+        followingFinished.resolve()
+        return { tweets: browserPosts(101) }
+      },
+    } as unknown as TwitterClient
+    const app = await createApp(12, {
+      twitterClientFactory() {
+        return fakeClient
+      },
+    })
+
+    try {
+      await app.setup.waitForFrame((frame) => frame.includes("CONNECT X"))
+      await loginCookie(app)
+      await homeRequested.promise
+      const homeLoading = await app.setup.waitForFrame((frame) => frame.includes("Loading Home"))
+      expect(homeLoading).toContain("LOADING HOME")
+      const loadingViewportHeight = getScrollBox(app, "x-feed").viewport.height
+      const activityRow = app.setup.renderer.root.findDescendantById("x-activity-row")
+      expect(activityRow?.width).toBe(100)
+      expect(activityRow?.height).toBe(1)
+      expect(app.setup.renderer.root.findDescendantById("x-activity-spinner")?.visible).toBe(true)
+
+      await clickRenderable(app, "x-header-following")
+      await followingRequested.promise
+      const overlapping = await app.setup.waitForFrame(
+        (frame) => frame.includes("Loading Following") && frame.includes("2 operations"),
+      )
+      expect(overlapping).toContain("LOADING FOLLOWING")
+
+      await clickRenderable(app, "x-header-home")
+      expect(homeCalls).toBe(1)
+      releaseFollowing.resolve()
+      await followingFinished.promise
+      const stillLoadingHome = await app.setup.waitForFrame(
+        (frame) => frame.includes("Loading Home") && !frame.includes("2 operations"),
+      )
+      expect(stillLoadingHome).not.toContain("Post 101")
+
+      releaseHome.resolve()
+      await homeFinished.promise
+      await app.setup.waitForFrame((frame) => frame.includes("Post 1"))
+      const homeFeed = getScrollBox(app, "x-feed")
+      expect(homeFeed.viewport.height).toBe(loadingViewportHeight)
+      app.setup.mockInput.pressKey("e")
+      await app.setup.waitForFrame((frame) => frame.includes("[E] Show Less"))
+      for (let index = 0; index < 5; index += 1) app.setup.mockInput.pressKey("j")
+      await app.setup.renderOnce()
+      const homeScrollTop = homeFeed.scrollTop
+      expect(homeScrollTop).toBeGreaterThan(0)
+      expect(getCard(app, "6").backgroundColor.toInts()).toEqual([22, 24, 28, 255])
+
+      await clickRenderable(app, "x-header-following")
+      const followingFrame = await app.setup.waitForFrame((frame) => frame.includes("Post 101"))
+      expect(followingFrame).not.toContain("Loading Following")
+      const followingFeed = getScrollBox(app, "x-feed")
+      expect(followingFeed).not.toBe(homeFeed)
+      for (let index = 0; index < 3; index += 1) app.setup.mockInput.pressKey("j")
+      await app.setup.renderOnce()
+      const followingScrollTop = followingFeed.scrollTop
+      expect(followingScrollTop).toBeGreaterThan(0)
+
+      await clickRenderable(app, "x-header-home")
+      expect(getScrollBox(app, "x-feed")).toBe(homeFeed)
+      expect(homeFeed.scrollTop).toBe(homeScrollTop)
+      expect(getCard(app, "6").backgroundColor.toInts()).toEqual([22, 24, 28, 255])
+      const homeToggle = app.setup.renderer.root.findDescendantById("x-post-toggle-1") as TextRenderable
+      expect(homeToggle.content.chunks.map((chunk) => chunk.text).join("")).toContain("Show Less")
+
+      await clickRenderable(app, "x-header-following")
+      expect(getScrollBox(app, "x-feed")).toBe(followingFeed)
+      expect(followingFeed.scrollTop).toBe(followingScrollTop)
+      expect(homeCalls).toBe(1)
+      expect(followingCalls).toBe(1)
+      expect(app.setup.renderer.root.findDescendantById("x-activity-spinner")?.visible).toBe(false)
+      expectHealthy(app)
+    } finally {
+      releaseHome.resolve()
+      releaseFollowing.resolve()
       await app.close()
     }
   })

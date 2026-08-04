@@ -35,6 +35,7 @@ import { commandBindings, formatCommandBindings } from "@opentui/keymap/extras"
 import { createDefaultOpenTuiKeymap } from "@opentui/keymap/opentui"
 import { TwitterClient, type TweetData, type TwitterCookies } from "@steipete/bird"
 import { mapTweetResult } from "@steipete/bird/dist/lib/twitter-client-utils.js"
+import { SpinnerRenderable } from "opentui-spinner"
 import {
   ALL_PROFILES,
   getCookies,
@@ -363,8 +364,44 @@ interface CommentsPage {
 }
 
 interface TimelineReturnState {
-  scrollTop: number
-  status: StyledText
+  stream: TimelineStream
+}
+
+interface TimelineStatus {
+  message: string
+  color: string
+}
+
+interface TimelineStreamState {
+  stream: TimelineStream
+  feed: ScrollBoxRenderable
+  cards: BoxRenderable[]
+  tweets: TweetData[]
+  tweetIds: Set<string>
+  postBodies: Map<string, TextRenderable>
+  postToggles: Map<string, TextRenderable>
+  expandedPostIds: Set<string>
+  selectedIndex: number
+  hasMore: boolean
+  officialNextToken: string | null
+  cookieRequestedCount: number
+  nextRefreshAt: number
+  status: TimelineStatus
+  loaded: boolean
+  loading: boolean
+  loadingMore: boolean
+  requestEpoch: number
+  emptyState: BoxRenderable | null
+}
+
+interface LoadingActivity {
+  label: string
+  priority: number
+}
+
+interface LoadingActivityHandle {
+  update(label: string): void
+  done(): void
 }
 
 type TweetMedia = NonNullable<TweetData["media"]>[number]
@@ -452,7 +489,9 @@ let headerHomeText: TextRenderable | null = null
 let headerFollowingText: TextRenderable | null = null
 let headerActionText: TextRenderable | null = null
 let footer: BoxRenderable | null = null
-let emptyState: BoxRenderable | null = null
+let activityRow: BoxRenderable | null = null
+let activitySpinner: SpinnerRenderable | null = null
+let activityLabel: TextRenderable | null = null
 let authOverlay: BoxRenderable | null = null
 let authInput: InputRenderable | null = null
 let authSelect: SelectRenderable | null = null
@@ -467,22 +506,9 @@ let authMode: "manual" | "browser" | null = null
 let selectedCookieSource: CookieSource | null = null
 let detectedBrowserOverride: BrowserSourceId[] | null = null
 let cookieSessionBlocked = false
-let nextRefreshAt = 0
-let cards: BoxRenderable[] = []
-let timelineTweets: TweetData[] = []
-let timelineTweetIds = new Set<string>()
-let postBodies = new Map<string, TextRenderable>()
-let postToggles = new Map<string, TextRenderable>()
-let expandedPostIds = new Set<string>()
-let selectedIndex = -1
-let loading = false
-let loadingMore = false
-let timelineHasMore = false
-let officialNextToken: string | null = null
-let cookieRequestedCount = PAGE_SIZE
-let feedScrollListener: (() => void) | null = null
-let loadingMoreIndicator: BoxRenderable | null = null
+let timelineStreams = new Map<TimelineStream, TimelineStreamState>()
 let generation = 0
+let sessionEpoch = 0
 let modalRoutes: ModalRoute[] = []
 let modalReturnsToFeed = false
 let browserRouteSources: CookieSource[] = []
@@ -517,6 +543,8 @@ let imagePanX = 0
 let imagePanY = 0
 let imageMessage = ""
 let imageFallbackSource: string | null = null
+let loadingActivityId = 0
+let loadingActivities = new Map<number, LoadingActivity>()
 let twitterClientFactory = (options: ConstructorParameters<typeof TwitterClient>[0]) => new TwitterClient(options)
 let openExternalUrl = launchUrl
 
@@ -819,6 +847,7 @@ function mapOfficialPosts(response: XApiResponse<XApiPost[]>, fallbackAuthor: XA
 async function fetchOfficialTimeline(
   paginationToken?: string,
   requestGeneration: number = generation,
+  requestSessionEpoch: number = sessionEpoch,
 ): Promise<{
   tweets: TweetData[]
   nextToken: string | null
@@ -829,7 +858,8 @@ async function fetchOfficialTimeline(
 
   if (!officialUser) {
     const { data } = await fetchXApi<XApiUser>("/2/users/me?user.fields=id,name,profile_image_url,username", token)
-    if (requestGeneration !== generation) throw new Error("Timeline request was cancelled.")
+    if (requestGeneration !== generation || requestSessionEpoch !== sessionEpoch)
+      throw new Error("Timeline request was cancelled.")
     officialUser = requireApiData(data, "the authenticated user")
   }
 
@@ -1083,16 +1113,50 @@ function updateFooter(): void {
   addFooterItem("x-footer-logs", formatCommandKey("app.console"), "logs", COLORS.secondary, toggleConsole)
 }
 
-function resetPaginationState(): void {
-  hideLoadingMoreIndicator()
-  loadingMore = false
-  timelineHasMore = false
-  officialNextToken = null
-  cookieRequestedCount = PAGE_SIZE
+function timelineState(stream: TimelineStream = currentStream): TimelineStreamState | null {
+  return timelineStreams.get(stream) ?? null
+}
+
+function updateActivityRow(): void {
+  if (!activityRow || !activitySpinner || !activityLabel) return
+  const active = [...loadingActivities.entries()].sort(
+    ([leftId, left], [rightId, right]) => right.priority - left.priority || rightId - leftId,
+  )
+  const current = active[0]?.[1]
+  activitySpinner.visible = current !== undefined
+  activityLabel.content = current ? `${current.label}${active.length > 1 ? ` · ${active.length} operations` : ""}` : ""
+}
+
+function beginLoadingActivity(label: string, priority: number): LoadingActivityHandle {
+  const id = ++loadingActivityId
+  loadingActivities.set(id, { label, priority })
+  updateActivityRow()
+  let finished = false
+  return {
+    update(nextLabel) {
+      if (finished) return
+      const activity = loadingActivities.get(id)
+      if (activity) activity.label = nextLabel
+      updateActivityRow()
+    },
+    done() {
+      if (finished) return
+      finished = true
+      loadingActivities.delete(id)
+      updateActivityRow()
+    },
+  }
+}
+
+function resetPaginationState(state: TimelineStreamState): void {
+  state.loadingMore = false
+  state.hasMore = false
+  state.officialNextToken = null
+  state.cookieRequestedCount = PAGE_SIZE
 }
 
 function setTimelineStream(stream: TimelineStream): boolean {
-  if (!connectionMode || loading || loadingMore) return false
+  if (!connectionMode) return false
   if (connectionMode === "official") {
     currentStream = "following"
     updateHeader()
@@ -1102,12 +1166,14 @@ function setTimelineStream(stream: TimelineStream): boolean {
   }
 
   if (currentStream === stream) return true
-  currentStream = stream
-  updateHeader()
-  resetPaginationState()
-  nextRefreshAt = 0
-  clearFeed()
-  void refreshTimeline()
+  const destination = timelineState(stream)
+  if (!destination || !activateTimelineStream(stream)) return false
+  if (destination.loaded) {
+    setStatus(destination.status.message, destination.status.color)
+    if (!destination.loading && Date.now() >= destination.nextRefreshAt) void refreshTimeline(destination, true)
+  } else if (!destination.loading) {
+    void refreshTimeline(destination)
+  }
   return true
 }
 
@@ -1153,7 +1219,8 @@ function toggleConsole(): void {
 }
 
 async function openTimelinePost(): Promise<boolean> {
-  const tweet = timelineTweets[selectedIndex]
+  const state = timelineState()
+  const tweet = state?.tweets[state.selectedIndex]
   if (!tweet) return false
   try {
     await openPost(tweet)
@@ -1177,16 +1244,8 @@ async function openSelectedComment(): Promise<boolean> {
 }
 
 function openSessionFlowFromFeed(): boolean {
-  if (loading || loadingMore) return false
-  client = null
-  connectionMode = null
-  officialToken = null
-  officialUser = null
-  selectedCookieSource = null
-  authMode = null
-  cookieSessionBlocked = false
-  nextRefreshAt = 0
-  setStatus("Waiting for a session...", COLORS.muted)
+  const state = timelineState()
+  if (state?.loading || state?.loadingMore) return false
   openConnectionFlow(true)
   return true
 }
@@ -1451,7 +1510,8 @@ function tweetQuoteCount(tweet: TweetData): number {
 
 function selectedImageTweet(): TweetData | null {
   if (currentView === "comments") return commentTweets[selectedCommentIndex] ?? commentsRootTweet
-  return timelineTweets[selectedIndex] ?? null
+  const state = timelineState()
+  return state?.tweets[state.selectedIndex] ?? null
 }
 
 function updateImageViewText(): void {
@@ -1947,27 +2007,28 @@ function addQuotedPost(
   card.add(quoteCard)
 }
 
-function clearFeed(): void {
-  for (const card of cards) card.destroyRecursively()
-  cards = []
-  timelineTweets = []
-  timelineTweetIds.clear()
-  postBodies.clear()
-  postToggles.clear()
-  expandedPostIds.clear()
-  selectedIndex = -1
-
-  if (emptyState) {
-    emptyState.destroyRecursively()
-    emptyState = null
-  }
+function clearFeed(state: TimelineStreamState, clearExpanded: boolean = true): void {
+  for (const card of state.cards) card.destroyRecursively()
+  state.cards = []
+  state.tweets = []
+  state.tweetIds.clear()
+  state.postBodies.clear()
+  state.postToggles.clear()
+  if (clearExpanded) state.expandedPostIds.clear()
+  state.selectedIndex = -1
+  state.emptyState?.destroyRecursively()
+  state.emptyState = null
 }
 
-function showEmptyState(title: string, message: string, tone: "loading" | "error" = "loading"): void {
-  if (!feed) return
-  clearFeed()
+function showEmptyState(
+  state: TimelineStreamState,
+  title: string,
+  message: string,
+  tone: "loading" | "error" = "loading",
+): void {
+  clearFeed(state)
 
-  emptyState = new BoxRenderable(feed.ctx, {
+  state.emptyState = new BoxRenderable(state.feed.ctx, {
     id: "x-empty-state",
     width: "100%",
     padding: 2,
@@ -1978,93 +2039,61 @@ function showEmptyState(title: string, message: string, tone: "loading" | "error
     backgroundColor: COLORS.card,
     flexShrink: 0,
   })
-  emptyState.add(
-    new TextRenderable(feed.ctx, {
+  state.emptyState.add(
+    new TextRenderable(state.feed.ctx, {
       content: t`${bold(fg(tone === "error" ? COLORS.error : COLORS.accent)(title))}
 
 ${fg(COLORS.secondary)(message)}`,
       wrapMode: "word",
     }),
   )
-  feed.add(emptyState)
+  state.feed.add(state.emptyState)
 }
 
-function selectPost(nextIndex: number, loadMore: boolean = true): void {
-  if (!feed || cards.length === 0) return
-  selectedIndex = Math.max(0, Math.min(nextIndex, cards.length - 1))
+function selectPost(state: TimelineStreamState, nextIndex: number, loadMore: boolean = true): void {
+  if (state.cards.length === 0) return
+  state.selectedIndex = Math.max(0, Math.min(nextIndex, state.cards.length - 1))
 
-  for (const [index, card] of cards.entries()) {
-    const selected = index === selectedIndex
+  for (const [index, card] of state.cards.entries()) {
+    const selected = index === state.selectedIndex
     card.backgroundColor = selected ? COLORS.cardActive : COLORS.card
     card.borderColor = selected ? COLORS.borderActive : COLORS.border
   }
 
-  const selectedCard = cards[selectedIndex]
-  if (selectedCard) feed.scrollChildIntoView(selectedCard.id)
-  if (loadMore && selectedIndex >= timelineTweets.length - 5) void loadMoreTimeline()
+  const selectedCard = state.cards[state.selectedIndex]
+  if (selectedCard) state.feed.scrollChildIntoView(selectedCard.id)
+  if (loadMore && state.selectedIndex >= state.tweets.length - 5) void loadMoreTimeline(state)
 }
 
-function createLoadingMoreIndicator(): BoxRenderable | null {
-  if (!feed) return null
-  const indicator = new BoxRenderable(feed.ctx, {
-    id: "x-loading-more",
-    position: "absolute",
-    left: 0,
-    bottom: 0,
-    width: "100%",
-    height: 1,
-    flexShrink: 0,
-    zIndex: 50,
-    backgroundColor: COLORS.panel,
-    visible: false,
-  })
-  indicator.add(
-    new TextRenderable(feed.ctx, {
-      id: "x-loading-more-text",
-      content: t`${fg(COLORS.secondary)("···")} ${bold(fg(COLORS.primary)("LOADING MORE POSTS"))}`,
-      height: 1,
-      wrapMode: "none",
-    }),
-  )
-  return indicator
-}
-
-function showLoadingMoreIndicator(): void {
-  if (loadingMoreIndicator && !loadingMoreIndicator.isDestroyed) loadingMoreIndicator.visible = true
-}
-
-function hideLoadingMoreIndicator(): void {
-  if (loadingMoreIndicator && !loadingMoreIndicator.isDestroyed) loadingMoreIndicator.visible = false
-}
-
-function togglePostExpansion(index: number): boolean {
-  const tweet = timelineTweets[index]
+function togglePostExpansion(state: TimelineStreamState, index: number): boolean {
+  const tweet = state.tweets[index]
   if (!tweet || !postPreview(displayPostText(tweet), false).isLong) return false
   const itemId = timelineItemId(tweet)
-  const body = postBodies.get(itemId)
-  const toggle = postToggles.get(itemId)
+  const body = state.postBodies.get(itemId)
+  const toggle = state.postToggles.get(itemId)
   if (!body || !toggle) return false
 
-  const expanded = !expandedPostIds.has(itemId)
-  if (expanded) expandedPostIds.add(itemId)
-  else expandedPostIds.delete(itemId)
+  const expanded = !state.expandedPostIds.has(itemId)
+  if (expanded) state.expandedPostIds.add(itemId)
+  else state.expandedPostIds.delete(itemId)
   body.content = postBodyContent(tweet, expanded)
   toggle.content = postToggleContent(expanded)
   const currentGeneration = generation
   queueMicrotask(() => {
-    if (currentGeneration === generation && currentView === "timeline") feed?.scrollChildIntoView(`x-post-${itemId}`)
+    if (currentGeneration === generation && currentView === "timeline" && currentStream === state.stream)
+      state.feed.scrollChildIntoView(`x-post-${itemId}`)
   })
   return true
 }
 
 function toggleSelectedPostExpansion(): boolean {
-  return togglePostExpansion(selectedIndex)
+  const state = timelineState()
+  return state ? togglePostExpansion(state, state.selectedIndex) : false
 }
 
-function createPostCard(tweet: TweetData, index: number): BoxRenderable | null {
-  if (!feed) return null
+function createPostCard(state: TimelineStreamState, tweet: TweetData, index: number): BoxRenderable {
   const itemId = timelineItemId(tweet)
-  const card = new BoxRenderable(feed.ctx, {
+  const card = new BoxRenderable(state.feed.ctx, {
     id: `x-post-${itemId}`,
     width: "100%",
     paddingLeft: 1,
@@ -2075,41 +2104,51 @@ function createPostCard(tweet: TweetData, index: number): BoxRenderable | null {
     borderColor: COLORS.border,
     flexShrink: 0,
   })
-  makeClickable(card, () => selectPost(index), undefined, false)
+  makeClickable(
+    card,
+    () => selectPost(state, index),
+    () => currentStream === state.stream,
+    false,
+  )
   addRepostContext(card, tweet, index, "x-post")
   addPostAuthor(card, tweet, index)
-  const body = new TextRenderable(feed.ctx, {
+  const body = new TextRenderable(state.feed.ctx, {
     id: `x-post-content-${index}`,
-    content: postBodyContent(tweet, expandedPostIds.has(itemId)),
+    content: postBodyContent(tweet, state.expandedPostIds.has(itemId)),
     width: "100%",
     wrapMode: "word",
     selectable: true,
   })
-  postBodies.set(itemId, body)
+  state.postBodies.set(itemId, body)
   card.add(body)
   if (postPreview(displayPostText(tweet), false).isLong) {
-    const toggle = new TextRenderable(feed.ctx, {
+    const toggle = new TextRenderable(state.feed.ctx, {
       id: `x-post-toggle-${itemId}`,
-      content: postToggleContent(expandedPostIds.has(itemId)),
+      content: postToggleContent(state.expandedPostIds.has(itemId)),
       marginTop: 1,
       wrapMode: "none",
       selectable: false,
     })
-    makeClickable(toggle, () => {
-      selectPost(index, false)
-      return togglePostExpansion(index)
-    })
-    postToggles.set(itemId, toggle)
+    makeClickable(
+      toggle,
+      () => {
+        selectPost(state, index, false)
+        return togglePostExpansion(state, index)
+      },
+      () => currentStream === state.stream,
+    )
+    state.postToggles.set(itemId, toggle)
     card.add(toggle)
   }
   const openMedia = (mediaTweet: TweetData, media: TweetMedia) => {
-    selectPost(index, false)
+    selectPost(state, index, false)
     openImageView(mediaTweet, media)
   }
   addPostMedia(card, tweet, index, "x-post-media", openMedia)
   addQuotedPost(card, tweet, index, "x-post", openMedia)
   addPostMetrics(card, tweet, index, "x-post", () => {
-    selectPost(index, false)
+    if (currentStream !== state.stream) return false
+    selectPost(state, index, false)
     return openCommentsView()
   })
   return card
@@ -2158,35 +2197,58 @@ function createCommentsPostCard(
   return card
 }
 
-function appendTweets(tweets: readonly TweetData[]): number {
-  if (!feed) return 0
+function appendTweets(state: TimelineStreamState, tweets: readonly TweetData[]): number {
   let added = 0
   for (const tweet of tweets) {
     const itemId = timelineItemId(tweet)
-    if (timelineTweetIds.has(itemId)) continue
-    const index = timelineTweets.length
-    const card = createPostCard(tweet, index)
-    if (!card) continue
-    timelineTweetIds.add(itemId)
-    timelineTweets.push(tweet)
-    cards.push(card)
-    feed.add(card)
+    if (state.tweetIds.has(itemId)) continue
+    const index = state.tweets.length
+    const card = createPostCard(state, tweet, index)
+    state.tweetIds.add(itemId)
+    state.tweets.push(tweet)
+    state.cards.push(card)
+    state.feed.add(card)
     added += 1
   }
   return added
 }
 
-function showTweets(tweets: readonly TweetData[]): void {
-  if (!feed) return
-  clearFeed()
-  appendTweets(tweets)
-
-  if (cards.length > 0) selectPost(0, false)
+function showTweets(state: TimelineStreamState, tweets: readonly TweetData[], preserveViewport: boolean = false): void {
+  const previousSelectedIndex = state.selectedIndex
+  const selectedTweet = preserveViewport ? state.tweets[state.selectedIndex] : undefined
+  const selectedItemId = selectedTweet ? timelineItemId(selectedTweet) : null
+  const selectedOffset = state.cards[state.selectedIndex]
+    ? state.cards[state.selectedIndex]!.screenY - state.feed.viewport.screenY
+    : 0
+  clearFeed(state, !preserveViewport)
+  appendTweets(state, tweets)
+  const matchingIndex = selectedItemId
+    ? state.tweets.findIndex((tweet) => timelineItemId(tweet) === selectedItemId)
+    : -1
+  const selectedIndex =
+    matchingIndex >= 0 ? matchingIndex : Math.min(Math.max(previousSelectedIndex, 0), state.cards.length - 1)
+  if (state.cards.length > 0) selectPost(state, selectedIndex, false)
+  if (preserveViewport && matchingIndex >= 0) {
+    queueMicrotask(() => {
+      const selectedCard = state.cards[state.selectedIndex]
+      if (!state.feed.isDestroyed && selectedCard)
+        state.feed.scrollTop += selectedCard.screenY - state.feed.viewport.screenY - selectedOffset
+    })
+  }
 }
 
 function setStatus(message: string, color: string): void {
   if (!statusText) return
+  if (currentView === "timeline") {
+    const state = timelineState()
+    if (state) state.status = { message, color }
+  }
   statusText.content = t`${bold(fg(color)("●"))} ${fg(COLORS.secondary)(message)}`
+}
+
+function setTimelineStatus(state: TimelineStreamState, message: string, color: string): void {
+  state.status = { message, color }
+  if (currentView === "timeline" && currentStream === state.stream) setStatus(message, color)
 }
 
 function clearCommentsContent(): void {
@@ -2237,25 +2299,29 @@ function selectComment(nextIndex: number, scrollIntoView: boolean = true): void 
 }
 
 function closeCommentsView(): boolean {
-  if (currentView !== "comments" || !feed || !commentsFeed) return false
+  if (currentView !== "comments" || !commentsFeed) return false
   commentsGeneration += 1
   commentsLoading = false
   commentsPreparing = false
   commentsHasMore = false
-  feed.visible = true
+  const state = timelineState(timelineReturnState?.stream ?? currentStream)
+  if (!state) return false
+  currentStream = state.stream
+  feed = state.feed
+  state.feed.visible = true
   currentView = "timeline"
   commentsRootTweet = null
   updateHeader()
   updateFooter()
-  if (timelineReturnState && statusText) statusText.content = timelineReturnState.status
-  feed.scrollTop = timelineReturnState?.scrollTop ?? feed.scrollTop
+  setStatus(state.status.message, state.status.color)
   timelineReturnState = null
-  feed.focus()
+  state.feed.focus()
   clearCommentsContent()
   return true
 }
 
 async function openCommentsView(): Promise<boolean> {
+  const state = timelineState()
   if (
     currentView !== "timeline" ||
     !feed ||
@@ -2264,13 +2330,15 @@ async function openCommentsView(): Promise<boolean> {
     !connectionMode ||
     !currentRenderer ||
     commentsPreparing ||
-    loading ||
-    loadingMore
+    !state ||
+    state.loading ||
+    state.loadingMore
   )
     return false
-  const tweet = timelineTweets[selectedIndex]
+  const tweet = state.tweets[state.selectedIndex]
   if (!tweet) return false
   const renderer = currentRenderer
+  const activity = beginLoadingActivity("Preparing comments", 70)
 
   commentsGeneration += 1
   const requestGeneration = commentsGeneration
@@ -2279,7 +2347,7 @@ async function openCommentsView(): Promise<boolean> {
   commentsCursor = null
   commentsHasMore = true
   commentsRootTweet = tweet
-  timelineReturnState = { scrollTop: feed.scrollTop, status: statusText.content }
+  timelineReturnState = { stream: state.stream }
   clearCommentsContent()
   commentsFeed.scrollTop = 0
   commentsFeed.add(createCommentsPostCard(commentsFeed, tweet, 0, "x-comments-root"))
@@ -2309,21 +2377,24 @@ async function openCommentsView(): Promise<boolean> {
     currentRenderer !== renderer ||
     renderer.isDestroyed ||
     currentView !== "timeline" ||
+    currentStream !== state.stream ||
     !connectionMode ||
     !feed ||
     !commentsFeed
   ) {
     if (requestGeneration === commentsGeneration) commentsPreparing = false
+    activity.done()
     return false
   }
 
-  feed.visible = false
+  state.feed.visible = false
   currentView = "comments"
   updateHeader()
   updateFooter()
   commentsFeed.focus()
   setStatus("Loading direct replies...", COLORS.amber)
   commentsPreparing = false
+  activity.done()
   void loadCommentsPage()
   return true
 }
@@ -2510,7 +2581,6 @@ function enableSelectMouse(select: SelectRenderable): void {
 function selectCookieSource(source: CookieSource): void {
   rememberBrowserSource(source.id)
   connectionMode = "cookie"
-  currentStream = "home"
   selectedCookieSource = source
   client = null
   officialToken = null
@@ -2518,9 +2588,10 @@ function selectCookieSource(source: CookieSource): void {
   sessionSource = source.label
   authMode = "browser"
   cookieSessionBlocked = false
-  updateHeader()
+  clearTimelineCaches()
+  const state = activateTimelineStream("home")
   closeModalFlow()
-  void refreshTimeline()
+  void refreshTimeline(state)
 }
 
 function showBrowserPicker(renderer: CliRenderer, sources: CookieSource[]): void {
@@ -2625,14 +2696,14 @@ function submitOfficialToken(value: string): void {
   officialToken = token
   officialUser = null
   connectionMode = "official"
-  currentStream = "following"
   client = null
   selectedCookieSource = null
   sessionSource = "X API v2"
   cookieSessionBlocked = false
-  updateHeader()
+  clearTimelineCaches()
+  const state = activateTimelineStream("following")
   closeModalFlow()
-  void refreshTimeline()
+  void refreshTimeline(state)
 }
 
 function showOfficialTokenOverlay(renderer: CliRenderer): void {
@@ -2879,14 +2950,14 @@ function submitSession(value: string): void {
       client = twitterClientFactory({ cookies, timeoutMs: 20_000, quoteDepth: 1 })
       rememberBrowserSource(null)
       connectionMode = "cookie"
-      currentStream = "home"
       selectedCookieSource = null
       officialToken = null
       officialUser = null
       sessionSource = "manual session"
       authMode = "manual"
       cookieSessionBlocked = false
-      updateHeader()
+      clearTimelineCaches()
+      activateTimelineStream("home")
     } catch (error) {
       if (authHint) {
         authHint.content = t`${bold(fg(COLORS.error)("INVALID SESSION"))} ${fg(COLORS.secondary)(
@@ -2915,7 +2986,7 @@ function submitSession(value: string): void {
   }
 
   closeModalFlow()
-  void refreshTimeline()
+  void refreshTimeline(timelineState())
 }
 
 function showCookieAuthOverlay(renderer: CliRenderer): void {
@@ -3043,13 +3114,15 @@ function registerXKeymap(renderer: CliRenderer): Keymap<Renderable, KeyEvent> {
         {
           name: "x.feed.next",
           run() {
-            selectPost(selectedIndex + 1)
+            const state = timelineState()
+            if (state) selectPost(state, state.selectedIndex + 1)
           },
         },
         {
           name: "x.feed.previous",
           run() {
-            selectPost(selectedIndex - 1)
+            const state = timelineState()
+            if (state) selectPost(state, state.selectedIndex - 1)
           },
         },
         {
@@ -3190,10 +3263,10 @@ function registerXKeymap(renderer: CliRenderer): Keymap<Renderable, KeyEvent> {
     }),
   )
 
-  if (feed) {
+  for (const state of timelineStreams.values()) {
     keymapDisposers.push(
       keymap.registerLayer({
-        target: feed,
+        target: state.feed,
         targetMode: "focus",
         bindings: commandBindings({ ...FEED_BINDINGS, ...VIEW_BINDINGS }),
       }),
@@ -3223,10 +3296,14 @@ function registerXKeymap(renderer: CliRenderer): Keymap<Renderable, KeyEvent> {
   return keymap
 }
 
-async function refreshTimeline(): Promise<void> {
-  if (loading || loadingMore || !connectionMode) return
+async function refreshTimeline(
+  state: TimelineStreamState | null = timelineState(),
+  background: boolean = false,
+): Promise<void> {
+  if (!state || state.loading || state.loadingMore || !connectionMode) return
   if (connectionMode === "cookie" && cookieSessionBlocked) {
-    setStatus(
+    setTimelineStatus(
+      state,
       `Cookie session stopped after an account-control response · ${formatCommandKey("x.session.open")} reconnect`,
       COLORS.error,
     )
@@ -3234,31 +3311,38 @@ async function refreshTimeline(): Promise<void> {
   }
 
   const now = Date.now()
-  if (now < nextRefreshAt) {
-    const seconds = Math.ceil((nextRefreshAt - now) / 1_000)
-    setStatus(`Refresh cooldown · ${seconds}s remaining`, COLORS.amber)
+  if (now < state.nextRefreshAt) {
+    if (!background) {
+      const seconds = Math.ceil((state.nextRefreshAt - now) / 1_000)
+      setTimelineStatus(state, `Refresh cooldown · ${seconds}s remaining`, COLORS.amber)
+    }
     return
   }
 
-  loading = true
+  state.loading = true
+  const requestEpoch = ++state.requestEpoch
   const currentGeneration = generation
+  const currentSessionEpoch = sessionEpoch
   const cooldown = connectionMode === "official" ? OFFICIAL_REFRESH_COOLDOWN_MS : COOKIE_REFRESH_COOLDOWN_MS
+  const streamLabel = state.stream === "following" ? "Following" : "Home"
+  const activity = beginLoadingActivity(`${state.loaded ? "Refreshing" : "Loading"} ${streamLabel}`, 80)
+  let succeeded = false
 
-  if (cards.length === 0) {
-    const sourceName =
-      connectionMode === "official" ? "the documented X API" : (selectedCookieSource?.label ?? "browser")
+  if (!state.loaded && state.cards.length === 0) {
     showEmptyState(
-      "CONNECTING TO X",
+      state,
+      `LOADING ${streamLabel.toUpperCase()}`,
       connectionMode === "official"
-        ? `Loading the reverse-chronological home timeline from ${sourceName}.`
-        : `Looking for a signed-in x.com session in ${sourceName}. Cookie values stay in memory and are never displayed.`,
+        ? "Loading the documented reverse-chronological timeline."
+        : `Loading ${streamLabel} with the active ${selectedCookieSource?.label ?? "browser"} session.`,
     )
   }
-  setStatus(
+  setTimelineStatus(
+    state,
     connectionMode === "official"
       ? "Calling the documented X API..."
       : client
-        ? "Refreshing the browser-session timeline..."
+        ? `${state.loaded ? "Refreshing" : "Loading"} the ${streamLabel} timeline...`
         : `Reading ${selectedCookieSource?.label ?? "browser"} session...`,
     COLORS.amber,
   )
@@ -3268,13 +3352,11 @@ async function refreshTimeline(): Promise<void> {
     let status: string
 
     if (connectionMode === "official") {
-      currentStream = "following"
-      updateHeader()
-      const result = await fetchOfficialTimeline()
+      const result = await fetchOfficialTimeline(undefined, currentGeneration, currentSessionEpoch)
       tweets = result.tweets
-      officialNextToken = result.nextToken
-      cookieRequestedCount = PAGE_SIZE
-      timelineHasMore = result.nextToken !== null
+      state.officialNextToken = result.nextToken
+      state.cookieRequestedCount = PAGE_SIZE
+      state.hasMore = result.nextToken !== null
       const remaining = result.rateLimitRemaining ? ` · ${result.rateLimitRemaining} API requests remaining` : ""
       status = `${tweets.length} Following posts · X API v2 · read-only${remaining}`
     } else {
@@ -3284,44 +3366,55 @@ async function refreshTimeline(): Promise<void> {
       if (!activeClient) {
         if (!selectedCookieSource) throw new Error("No browser cookie source was selected.")
         const session = await findBrowserSession(selectedCookieSource)
-        if (currentGeneration !== generation) return
+        if (
+          currentGeneration !== generation ||
+          currentSessionEpoch !== sessionEpoch ||
+          requestEpoch !== state.requestEpoch
+        )
+          return
 
         source = session.source
         activeClient = twitterClientFactory({ cookies: session.cookies, timeoutMs: REQUEST_TIMEOUT_MS, quoteDepth: 1 })
         client = activeClient
         sessionSource = source
-        setStatus(`Connected via ${source}. Loading the timeline...`, COLORS.amber)
+        activity.update(`Loading ${streamLabel} via ${source}`)
+        setTimelineStatus(state, `Connected via ${source}. Loading the ${streamLabel} timeline...`, COLORS.amber)
       }
 
       const result =
-        currentStream === "following"
+        state.stream === "following"
           ? await activeClient.getHomeLatestTimeline(PAGE_SIZE, { includeRaw: true })
           : await activeClient.getHomeTimeline(PAGE_SIZE, { includeRaw: true })
       if ("error" in result) throw new Error(result.error)
       tweets = normalizeCookieTweets(result.tweets)
-      officialNextToken = null
-      cookieRequestedCount = PAGE_SIZE
-      timelineHasMore = result.tweets.length >= PAGE_SIZE
-      status = `${tweets.length} ${currentStream === "following" ? "Following" : "Home"} posts · ${source} · unofficial cookie mode`
+      state.officialNextToken = null
+      state.cookieRequestedCount = PAGE_SIZE
+      state.hasMore = result.tweets.length >= PAGE_SIZE
+      status = `${tweets.length} ${streamLabel} posts · ${source} · unofficial cookie mode`
     }
 
-    if (currentGeneration !== generation) return
+    if (currentGeneration !== generation || currentSessionEpoch !== sessionEpoch || requestEpoch !== state.requestEpoch)
+      return
+    const preserveViewport = state.loaded
     if (tweets.length === 0)
-      showEmptyState("YOUR HOME IS QUIET", `X returned no posts. ${formatCommandKey("x.feed.refresh")} refresh.`)
-    else showTweets(tweets)
-    setStatus(status, COLORS.green)
+      showEmptyState(state, "YOUR HOME IS QUIET", `X returned no posts. ${formatCommandKey("x.feed.refresh")} refresh.`)
+    else showTweets(state, tweets, preserveViewport)
+    state.loaded = true
+    setTimelineStatus(state, status, COLORS.green)
+    succeeded = true
   } catch (error) {
-    if (currentGeneration !== generation) return
+    if (currentGeneration !== generation || currentSessionEpoch !== sessionEpoch || requestEpoch !== state.requestEpoch)
+      return
     const message = error instanceof Error ? error.message : String(error)
     const cookieStop = connectionMode === "cookie" && shouldStopCookieSession(message)
     if (cookieStop) {
       cookieSessionBlocked = true
       client = null
-    } else if (connectionMode === "cookie" && authMode !== "manual") {
+    } else if (connectionMode === "cookie" && authMode !== "manual" && currentStream === state.stream) {
       client = null
     }
 
-    if (cards.length === 0) {
+    if (state.cards.length === 0) {
       const retryHint =
         connectionMode === "official"
           ? `Verify this is a user-context OAuth token with tweet.read and users.read scopes, then ${formatCommandKey("x.session.open")} replace it.`
@@ -3330,99 +3423,139 @@ async function refreshTimeline(): Promise<void> {
             : authMode === "manual"
               ? `Check the pasted auth_token and ct0 values, then ${formatCommandKey("x.session.open")} replace them.`
               : `Check the selected browser session, then ${formatCommandKey("x.session.open")} choose another source.`
-      showEmptyState("CAN'T LOAD X", `${message}\n\n${retryHint}`, "error")
+      showEmptyState(state, "CAN'T LOAD X", `${message}\n\n${retryHint}`, "error")
     }
-    setStatus(
+    setTimelineStatus(
+      state,
       cookieStop
         ? `Cookie session stopped · ${formatCommandKey("x.session.open")} reconnect`
         : `Connection failed · ${formatCommandKey("x.session.open")} replace credentials`,
       COLORS.error,
     )
   } finally {
-    if (currentGeneration === generation) {
-      loading = false
-      nextRefreshAt = Date.now() + cooldown
-      scheduleLoadMoreCheck()
+    activity.done()
+    if (
+      currentGeneration === generation &&
+      currentSessionEpoch === sessionEpoch &&
+      requestEpoch === state.requestEpoch
+    ) {
+      state.loading = false
+      state.nextRefreshAt = Date.now() + cooldown
+      if (succeeded) scheduleLoadMoreCheck(state)
     }
   }
 }
 
-async function loadMoreTimeline(): Promise<void> {
+async function loadMoreTimeline(state: TimelineStreamState | null = timelineState()): Promise<void> {
   if (
+    !state ||
     currentView !== "timeline" ||
-    loading ||
-    loadingMore ||
-    !timelineHasMore ||
+    currentStream !== state.stream ||
+    !state.feed.visible ||
+    state.loading ||
+    state.loadingMore ||
+    !state.hasMore ||
     !connectionMode ||
     currentRenderer?.isDestroyed
   )
     return
-  loadingMore = true
-  showLoadingMoreIndicator()
+  state.loadingMore = true
+  const requestEpoch = ++state.requestEpoch
   const currentGeneration = generation
-  setStatus("Loading more posts...", COLORS.muted)
+  const currentSessionEpoch = sessionEpoch
+  const streamLabel = state.stream === "following" ? "Following" : "Home"
+  const activity = beginLoadingActivity(`Loading more ${streamLabel} posts`, 50)
+  setTimelineStatus(state, `Loading more ${streamLabel} posts...`, COLORS.muted)
+  let succeeded = false
 
   try {
     let added = 0
     if (connectionMode === "official") {
-      const cursor = officialNextToken
+      const cursor = state.officialNextToken
       if (!cursor) {
-        timelineHasMore = false
+        state.hasMore = false
         return
       }
-      const result = await fetchOfficialTimeline(cursor)
-      if (currentGeneration !== generation) return
-      hideLoadingMoreIndicator()
-      added = appendTweets(result.tweets)
-      officialNextToken = result.nextToken === cursor ? null : result.nextToken
-      timelineHasMore = officialNextToken !== null && added > 0
+      const result = await fetchOfficialTimeline(cursor, currentGeneration, currentSessionEpoch)
+      if (
+        currentGeneration !== generation ||
+        currentSessionEpoch !== sessionEpoch ||
+        requestEpoch !== state.requestEpoch
+      )
+        return
+      added = appendTweets(state, result.tweets)
+      state.officialNextToken = result.nextToken === cursor ? null : result.nextToken
+      state.hasMore = state.officialNextToken !== null && added > 0
     } else {
       if (!client) {
-        timelineHasMore = false
+        state.hasMore = false
         return
       }
-      const requestedCount = cookieRequestedCount + PAGE_SIZE
+      const requestedCount = state.cookieRequestedCount + PAGE_SIZE
       const result =
-        currentStream === "following"
+        state.stream === "following"
           ? await client.getHomeLatestTimeline(requestedCount, { includeRaw: true })
           : await client.getHomeTimeline(requestedCount, { includeRaw: true })
-      if (currentGeneration !== generation) return
+      if (
+        currentGeneration !== generation ||
+        currentSessionEpoch !== sessionEpoch ||
+        requestEpoch !== state.requestEpoch
+      )
+        return
       if ("error" in result) throw new Error(result.error)
-      hideLoadingMoreIndicator()
-      added = appendTweets(normalizeCookieTweets(result.tweets))
-      cookieRequestedCount = requestedCount
-      timelineHasMore = result.tweets.length >= requestedCount && added > 0
+      added = appendTweets(state, normalizeCookieTweets(result.tweets))
+      state.cookieRequestedCount = requestedCount
+      state.hasMore = result.tweets.length >= requestedCount && added > 0
     }
 
-    setStatus(
+    setTimelineStatus(
+      state,
       added > 0
-        ? `${timelineTweets.length} posts · ${timelineHasMore ? "scroll for more" : "end of timeline"}`
-        : `${timelineTweets.length} posts · end of timeline`,
+        ? `${state.tweets.length} posts · ${state.hasMore ? "scroll for more" : "end of timeline"}`
+        : `${state.tweets.length} posts · end of timeline`,
       added > 0 ? COLORS.green : COLORS.secondary,
     )
+    succeeded = true
   } catch (error) {
-    if (currentGeneration !== generation) return
-    setStatus(`Could not load more posts: ${error instanceof Error ? error.message : String(error)}`, COLORS.error)
+    if (currentGeneration !== generation || currentSessionEpoch !== sessionEpoch || requestEpoch !== state.requestEpoch)
+      return
+    state.hasMore = false
+    setTimelineStatus(
+      state,
+      `Could not load more posts: ${error instanceof Error ? error.message : String(error)}`,
+      COLORS.error,
+    )
   } finally {
-    if (currentGeneration === generation) {
-      hideLoadingMoreIndicator()
-      loadingMore = false
-      scheduleLoadMoreCheck()
+    activity.done()
+    if (
+      currentGeneration === generation &&
+      currentSessionEpoch === sessionEpoch &&
+      requestEpoch === state.requestEpoch
+    ) {
+      state.loadingMore = false
+      if (succeeded) scheduleLoadMoreCheck(state)
     }
   }
 }
 
-function loadMoreNearBottom(): void {
-  if (currentView !== "timeline" || !feed || feed.isDestroyed || !timelineHasMore) return
-  if (feed.viewport.height <= 0 || feed.scrollHeight <= 0) return
-  const remaining = feed.scrollHeight - feed.scrollTop - feed.viewport.height
-  if (remaining <= Math.max(3, feed.viewport.height * 2)) void loadMoreTimeline()
+function loadMoreNearBottom(state: TimelineStreamState): void {
+  if (
+    currentView !== "timeline" ||
+    currentStream !== state.stream ||
+    !state.feed.visible ||
+    state.feed.isDestroyed ||
+    !state.hasMore
+  )
+    return
+  if (state.feed.viewport.height <= 0 || state.feed.scrollHeight <= 0) return
+  const remaining = state.feed.scrollHeight - state.feed.scrollTop - state.feed.viewport.height
+  if (remaining <= Math.max(3, state.feed.viewport.height * 2)) void loadMoreTimeline(state)
 }
 
-function scheduleLoadMoreCheck(): void {
+function scheduleLoadMoreCheck(state: TimelineStreamState): void {
   const currentGeneration = generation
   queueMicrotask(() => {
-    if (currentGeneration === generation) loadMoreNearBottom()
+    if (currentGeneration === generation) loadMoreNearBottom(state)
   })
 }
 
@@ -3439,6 +3572,7 @@ async function loadCommentsPage(): Promise<void> {
   commentsLoading = true
   const requestGeneration = commentsGeneration
   const cursor = commentsCursor ?? undefined
+  const activity = beginLoadingActivity(cursor ? "Loading more comments" : "Loading comments", 70)
 
   try {
     const result = await fetchCommentsPage(commentsRootTweet.id, cursor)
@@ -3475,6 +3609,7 @@ async function loadCommentsPage(): Promise<void> {
     )
     setStatus("Could not load comments", COLORS.error)
   } finally {
+    activity.done()
     if (requestGeneration === commentsGeneration) {
       commentsLoading = false
       scheduleCommentsCheck()
@@ -3523,6 +3658,64 @@ function createMainScrollBox(renderer: CliRenderer, id: string, zIndex: number):
   })
 }
 
+function createTimelineStreamState(renderer: CliRenderer, stream: TimelineStream): TimelineStreamState {
+  const streamFeed = createMainScrollBox(renderer, stream === "home" ? "x-feed" : "x-feed-following", 1)
+  const state: TimelineStreamState = {
+    stream,
+    feed: streamFeed,
+    cards: [],
+    tweets: [],
+    tweetIds: new Set(),
+    postBodies: new Map(),
+    postToggles: new Map(),
+    expandedPostIds: new Set(),
+    selectedIndex: -1,
+    hasMore: false,
+    officialNextToken: null,
+    cookieRequestedCount: PAGE_SIZE,
+    nextRefreshAt: 0,
+    status: { message: "Waiting for a session...", color: COLORS.muted },
+    loaded: false,
+    loading: false,
+    loadingMore: false,
+    requestEpoch: 0,
+    emptyState: null,
+  }
+  streamFeed.verticalScrollBar.on("change", () => loadMoreNearBottom(state))
+  return state
+}
+
+function clearTimelineCaches(): void {
+  sessionEpoch += 1
+  loadingActivities.clear()
+  updateActivityRow()
+  for (const state of timelineStreams.values()) {
+    state.requestEpoch += 1
+    state.loading = false
+    clearFeed(state)
+    resetPaginationState(state)
+    state.loaded = false
+    state.nextRefreshAt = 0
+    state.status = { message: "Waiting for a session...", color: COLORS.muted }
+    state.feed.scrollTop = 0
+  }
+}
+
+function activateTimelineStream(stream: TimelineStream, focus: boolean = true): TimelineStreamState | null {
+  const state = timelineState(stream)
+  if (!state) return null
+  for (const candidate of timelineStreams.values()) {
+    candidate.feed.visible = candidate === state
+    candidate.feed.id = candidate === state ? "x-feed" : `x-feed-${candidate.stream}`
+  }
+  currentStream = stream
+  feed = state.feed
+  updateHeader()
+  updateFooter()
+  if (focus) state.feed.focus()
+  return state
+}
+
 export function run(renderer: CliRenderer, options: XDemoRunOptions = {}): void {
   generation += 1
   currentRenderer = renderer
@@ -3536,11 +3729,8 @@ export function run(renderer: CliRenderer, options: XDemoRunOptions = {}): void 
   authMode = null
   selectedCookieSource = null
   cookieSessionBlocked = false
-  nextRefreshAt = 0
-  loadingMore = false
-  timelineHasMore = false
-  officialNextToken = null
-  cookieRequestedCount = PAGE_SIZE
+  timelineStreams.clear()
+  loadingActivities.clear()
   currentView = "timeline"
   timelineReturnState = null
   commentsRootTweet = null
@@ -3655,13 +3845,15 @@ export function run(renderer: CliRenderer, options: XDemoRunOptions = {}): void 
     backgroundColor: COLORS.background,
   })
   commentsFeed = createMainScrollBox(renderer, "x-comments-feed", 0)
-  feed = createMainScrollBox(renderer, "x-feed", 1)
+  const homeState = createTimelineStreamState(renderer, "home")
+  const followingState = createTimelineStreamState(renderer, "following")
+  timelineStreams.set("home", homeState)
+  timelineStreams.set("following", followingState)
+  feed = homeState.feed
+  followingState.feed.visible = false
   viewStack.add(commentsFeed)
-  viewStack.add(feed)
-  loadingMoreIndicator = createLoadingMoreIndicator()
-  if (loadingMoreIndicator) feed.viewport.add(loadingMoreIndicator)
-  feedScrollListener = loadMoreNearBottom
-  feed.verticalScrollBar.on("change", feedScrollListener)
+  viewStack.add(homeState.feed)
+  viewStack.add(followingState.feed)
   commentsScrollListener = loadCommentsNearBottom
   commentsFeed.verticalScrollBar.on("change", commentsScrollListener)
   const imageView = createImageView(renderer)
@@ -3676,6 +3868,32 @@ export function run(renderer: CliRenderer, options: XDemoRunOptions = {}): void 
     flexDirection: "row",
     backgroundColor: COLORS.panel,
   })
+  activityRow = new BoxRenderable(renderer, {
+    id: "x-activity-row",
+    width: "100%",
+    height: 1,
+    flexShrink: 0,
+    flexDirection: "row",
+    alignItems: "center",
+    backgroundColor: COLORS.panel,
+  })
+  activitySpinner = new SpinnerRenderable(renderer, {
+    name: "dots",
+    color: COLORS.amber,
+    backgroundColor: "transparent",
+    visible: false,
+  })
+  activitySpinner.id = "x-activity-spinner"
+  activityLabel = new TextRenderable(renderer, {
+    id: "x-activity-label",
+    content: "",
+    height: 1,
+    marginLeft: 1,
+    wrapMode: "none",
+    selectable: false,
+  })
+  activityRow.add(activitySpinner)
+  activityRow.add(activityLabel)
   updateFooter()
   resizeListener = () => {
     updateFooter()
@@ -3687,10 +3905,11 @@ export function run(renderer: CliRenderer, options: XDemoRunOptions = {}): void 
   root.add(header)
   root.add(statusBar)
   root.add(viewStack)
+  root.add(activityRow)
   root.add(footer)
   renderer.root.add(root)
   renderer.root.add(imageView)
-  feed.focus()
+  homeState.feed.focus()
   const rememberedSourceId = loadRememberedBrowserSource()
   const rememberedSource = rememberedSourceId
     ? detectCookieSources().find((source) => source.id === rememberedSourceId)
@@ -3705,8 +3924,6 @@ export function run(renderer: CliRenderer, options: XDemoRunOptions = {}): void 
 export function destroy(): void {
   generation += 1
   commentsGeneration += 1
-  loading = false
-  loadingMore = false
   client = null
   connectionMode = null
   officialToken = null
@@ -3718,10 +3935,6 @@ export function destroy(): void {
   detectedBrowserOverride = null
   activeKeymap = null
   cookieSessionBlocked = false
-  nextRefreshAt = 0
-  timelineHasMore = false
-  officialNextToken = null
-  cookieRequestedCount = PAGE_SIZE
   currentView = "timeline"
   timelineReturnState = null
   commentsRootTweet = null
@@ -3733,29 +3946,30 @@ export function destroy(): void {
   imageItems = []
   imageMessage = ""
   imageFallbackSource = null
+  loadingActivities.clear()
 
   while (keymapDisposers.length > 0) keymapDisposers.pop()?.()
   modalRoutes = []
   browserRouteSources = []
   modalReturnsToFeed = false
   destroyAuthOverlay()
-  hideLoadingMoreIndicator()
-  if (feedScrollListener && feed) feed.verticalScrollBar.off("change", feedScrollListener)
   if (commentsScrollListener && commentsFeed) commentsFeed.verticalScrollBar.off("change", commentsScrollListener)
   if (resizeListener && currentRenderer) currentRenderer.off(CliRenderEvents.RESIZE, resizeListener)
-  feedScrollListener = null
   commentsScrollListener = null
   resizeListener = null
   if (imageRenderable) imageRenderable.source = undefined
   imageOverlay?.destroyRecursively()
-  feed?.destroyRecursively()
+  for (const state of timelineStreams.values()) state.feed.destroyRecursively()
   commentsFeed?.destroyRecursively()
   root?.destroyRecursively()
-  loadingMoreIndicator = null
+  timelineStreams.clear()
   currentRenderer = null
   root = null
   feed = null
   commentsFeed = null
+  activityRow = null
+  activitySpinner = null
+  activityLabel = null
   imageOverlay = null
   imageViewport = null
   imageRenderable = null
@@ -3767,19 +3981,11 @@ export function destroy(): void {
   headerFollowingText = null
   headerActionText = null
   footer = null
-  emptyState = null
-  cards = []
-  timelineTweets = []
-  timelineTweetIds.clear()
-  postBodies.clear()
-  postToggles.clear()
-  expandedPostIds.clear()
   commentCards = []
   commentTweets = []
   commentTweetIds.clear()
   selectedCommentIndex = -1
   commentsStateText = null
-  selectedIndex = -1
 }
 
 if (import.meta.main) {

@@ -24,6 +24,7 @@
     "@opentui/keymap": "0.5.1",
     "@steipete/bird": "0.8.0",
     "@steipete/sweet-cookie": "0.4.1",
+    "opentui-spinner": "0.0.7",
     "web-tree-sitter": "0.25.10"
   },
   "devDependencies": {
