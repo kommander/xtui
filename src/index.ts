@@ -1171,7 +1171,7 @@ function addPostMetrics(
     id: `${idPrefix}-footer-${index}`,
     width: "100%",
     height: 1,
-    marginTop: 1,
+    marginTop: displayMediaItems(tweet).length > 0 || tweet.quotedTweet ? 0 : 1,
     flexDirection: "row",
     flexShrink: 0,
   })
@@ -1204,6 +1204,10 @@ function addPostMetrics(
     row.add(cell)
   }
   card.add(row)
+}
+
+function displayMediaItems(tweet: TweetData): TweetMedia[] {
+  return (tweet.media ?? []).filter((media) => Boolean(media.previewUrl || media.url))
 }
 
 interface ImageFailureContext {
@@ -1542,7 +1546,7 @@ function addPostMedia(
   idPrefix: string = "x-post-media",
   onOpen?: (tweet: TweetData, media: TweetMedia) => void,
 ): void {
-  const mediaItems = (tweet.media ?? []).filter((media) => Boolean(media.previewUrl || media.url))
+  const mediaItems = displayMediaItems(tweet)
   if (mediaItems.length === 0) return
 
   const mediaBox = new BoxRenderable(card.ctx, {
@@ -1550,6 +1554,8 @@ function addPostMedia(
     width: "100%",
     flexDirection: "column",
     flexShrink: 0,
+    marginTop: 1,
+    marginBottom: 1,
   })
 
   for (const [mediaIndex, media] of mediaItems.entries()) {
@@ -1641,6 +1647,8 @@ function addQuotedPost(
     width: "100%",
     flexDirection: "column",
     flexShrink: 0,
+    marginTop: displayMediaItems(tweet).length > 0 ? 0 : 1,
+    marginBottom: 1,
     paddingLeft: 1,
     paddingRight: 1,
     border: true,

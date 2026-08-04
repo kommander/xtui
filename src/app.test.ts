@@ -1020,6 +1020,71 @@ describe("xtui application", () => {
     }
   })
 
+  test("keeps exactly one row around media and quoted tweets", async () => {
+    const app = await createApp(60)
+    app.api.expectUser("spacing-token", {
+      body: { data: { id: "42", name: "Reader", username: "reader" } },
+    })
+    app.api.expectTimeline("spacing-token", "42", {
+      body: {
+        data: [
+          {
+            id: "7281",
+            text: "Parent body",
+            author_id: "7",
+            attachments: { media_keys: ["parent-photo"] },
+            referenced_tweets: [{ id: "7280", type: "quoted" }],
+          },
+        ],
+        includes: {
+          users: [
+            { id: "7", name: "Parent", username: "parent" },
+            { id: "8", name: "Quoted", username: "quoted" },
+          ],
+          tweets: [
+            {
+              id: "7280",
+              text: "Quoted body",
+              author_id: "8",
+              attachments: { media_keys: ["quoted-photo"] },
+            },
+          ],
+          media: [
+            { media_key: "parent-photo", type: "photo", url: RED_PNG_DATA_URL, width: 1, height: 1 },
+            { media_key: "quoted-photo", type: "photo", url: BLUE_PNG_DATA_URL, width: 1, height: 1 },
+          ],
+        },
+        meta: {},
+      },
+    })
+
+    try {
+      await app.setup.waitForFrame((frame) => frame.includes("CONNECT X"))
+      await loginOfficial(app, "spacing-token")
+      await waitForApiFrame(app, 2, (frame) => frame.includes("Parent body"))
+      await app.setup.flush({ maxPasses: 50 })
+
+      const body = app.setup.renderer.root.findDescendantById("x-post-content-0")!
+      const media = app.setup.renderer.root.findDescendantById("x-post-media-0")!
+      const quote = app.setup.renderer.root.findDescendantById("x-post-quote-0")!
+      const metrics = app.setup.renderer.root.findDescendantById("x-post-footer-0")!
+      const quotedBody = app.setup.renderer.root.findDescendantById("x-post-quote-content-0")!
+      const quotedMedia = app.setup.renderer.root.findDescendantById("x-post-quote-media-0")!
+      const verticalGap = (before: Renderable, after: Renderable) => after.screenY - before.screenY - before.height
+
+      expect(verticalGap(body, media)).toBe(1)
+      expect(verticalGap(media, quote)).toBe(1)
+      expect(verticalGap(quote, metrics)).toBe(1)
+      expect(verticalGap(quotedBody, quotedMedia)).toBe(1)
+      expect(quote.screenY + quote.height - 1 - (quotedMedia.screenY + quotedMedia.height)).toBe(1)
+
+      app.api.assertDone()
+      expectHealthy(app)
+    } finally {
+      await app.close()
+    }
+  })
+
   test("reveals comments only after their media layout is stable", async () => {
     const app = await createApp(36)
     const commentsRequested = deferred<void>()
