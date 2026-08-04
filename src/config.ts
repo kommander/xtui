@@ -31,6 +31,7 @@ export const DEFAULT_KEYBINDINGS = {
   "x.image.pan-right": "h",
   "x.image.close": "escape",
   "x.modal.back": "escape",
+  "app.bindings": "?",
   "app.console": "`",
   "app.quit": "ctrl+c",
 } as const
@@ -60,12 +61,21 @@ const keybindingSchema = z
   .string()
   .min(1, "Expected a non-empty key binding")
   .describe("A single OpenTUI key stroke, such as j, escape, or ctrl+c.")
+const bindingsKeySchema = z
+  .union([
+    z.literal("?"),
+    z
+      .string()
+      .min(2)
+      .regex(/^(?![eE][sS][cC][aA][pP][eE]$).+/),
+  ])
+  .describe("The global bindings key: ? or a non-text key/chord; Escape is reserved for closing the dialog.")
 const keybindingShape = Object.fromEntries(
   Object.entries(DEFAULT_KEYBINDINGS).map(([command, binding]) => [
     command,
-    keybindingSchema.meta({ default: binding }),
+    (command === "app.bindings" ? bindingsKeySchema : keybindingSchema).meta({ default: binding }),
   ]),
-) as Record<XtuiCommandName, typeof keybindingSchema>
+) as unknown as Record<XtuiCommandName, z.ZodType<string>>
 
 export const xtuiConfigFileSchema = z
   .strictObject({
@@ -158,7 +168,7 @@ export function loadConfig(path: string = configFilePath()): ConfigLoadResult {
     const keybindings = z.record(z.string(), z.unknown()).safeParse(record.data.keybindings)
     if (keybindings.success) {
       for (const command of Object.keys(DEFAULT_KEYBINDINGS) as XtuiCommandName[]) {
-        const binding = keybindingSchema.safeParse(keybindings.data[command])
+        const binding = keybindingShape[command].safeParse(keybindings.data[command])
         if (binding.success) config.keybindings[command] = binding.data
       }
     }

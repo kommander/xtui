@@ -159,6 +159,21 @@
           "description": "A single OpenTUI key stroke, such as j, escape, or ctrl+c.",
           "default": "escape"
         },
+        "app.bindings": {
+          "anyOf": [
+            {
+              "type": "string",
+              "const": "?"
+            },
+            {
+              "type": "string",
+              "minLength": 2,
+              "pattern": "^(?![eE][sS][cC][aA][pP][eE]$).+"
+            }
+          ],
+          "description": "The global bindings key: ? or a non-text key/chord; Escape is reserved for closing the dialog.",
+          "default": "?"
+        },
         "app.console": {
           "type": "string",
           "minLength": 1,

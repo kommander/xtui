@@ -422,6 +422,7 @@ describe("xtui application", () => {
           ...DEFAULT_KEYBINDINGS,
           "x.feed.next": "n",
           "x.feed.previous": "ctrl+",
+          "app.bindings": "escape",
           "app.quit": "q",
         },
       },
@@ -442,9 +443,17 @@ describe("xtui application", () => {
       expect((app.setup.renderer.console as unknown as { isVisible: boolean }).isVisible).toBe(false)
       await loginOfficial(app, "config-q`-token")
       const frame = await waitForApiFrame(app, 2, (value) => value.includes("Second configured post"))
-      expect(frame).toContain("N/K select")
+      expect(frame).toContain("C comments   I image")
+      expect(frame).toContain("[?]")
       expect(getScrollBox(app, "x-feed").verticalScrollBar.visible).toBe(true)
       expect(getScrollBox(app, "x-comments-feed").verticalScrollBar.visible).toBe(true)
+
+      app.setup.mockInput.pressKey("?")
+      await app.setup.waitForFrame((value) => value.includes("ACTIVE · TIMELINE"))
+      const closeHint = app.setup.renderer.root.findDescendantById("x-bindings-close") as TextRenderable
+      expect(closeHint.plainText).toBe("? / ESC close")
+      app.setup.mockInput.pressEscape()
+      expect(app.setup.renderer.currentFocusedRenderable?.id).toBe("x-feed")
 
       app.setup.mockInput.pressKey("j")
       await app.setup.renderOnce()
@@ -513,18 +522,178 @@ describe("xtui application", () => {
       expect(errorFrame).toContain("back")
       expect(errorFrame).toContain("quit")
 
+      app.setup.mockInput.pressKey("?")
+      await app.setup.waitForFrame((frame) => frame.includes("BINDINGS") && frame.includes("ACTIVE · DIALOG"))
+      app.setup.mockInput.pressKey("?")
+      expect(app.setup.renderer.currentFocusedRenderable?.id).toBe("x-official-token-input")
+
       await app.setup.mockInput.typeText("narrow-token")
       await clickRenderable(app, "x-official-token-hint-submit")
       const timelineFrame = await waitForApiFrame(app, 2, (frame) => frame.includes("Narrow timeline"))
-      expect(timelineFrame).toContain("comments image refresh session logs")
-      expect(timelineFrame).not.toContain("CTRL+C quit")
-      expect(app.setup.renderer.root.findDescendantById("x-footer-quit")).toBeUndefined()
+      expect(timelineFrame).toContain("C comments   I image")
+      expect(timelineFrame).toContain("[?]")
+      expect(timelineFrame).not.toContain("refresh")
+      expect(timelineFrame).not.toContain("session")
+      expect(timelineFrame).not.toContain("logs")
+      const footer = app.setup.renderer.root.findDescendantById("x-footer")!
+      const help = app.setup.renderer.root.findDescendantById("x-footer-bindings")!
+      expect(help.screenX + help.width).toBe(footer.screenX + footer.width)
 
       app.setup.renderer.resize(30, 12)
       await app.setup.renderOnce()
       const extraNarrowFrame = app.setup.captureCharFrame()
-      expect(extraNarrowFrame).toContain("comments refresh session logs")
-      expect(app.setup.renderer.root.findDescendantById("x-footer-image")).toBeUndefined()
+      expect(extraNarrowFrame).toContain("C comments   I image")
+      expect(extraNarrowFrame).toContain("[?]")
+      expect(app.setup.renderer.root.findDescendantById("x-footer-image")).toBeDefined()
+      const resizedHelp = app.setup.renderer.root.findDescendantById("x-footer-bindings")!
+      expect(resizedHelp.screenX + resizedHelp.width).toBe(footer.screenX + footer.width)
+
+      app.setup.renderer.resize(23, 12)
+      await app.setup.renderOnce()
+      const compactFrame = app.setup.captureCharFrame()
+      expect(compactFrame).toContain("[C] [I]")
+      expect(compactFrame).toContain("[?]")
+      expect(compactFrame).not.toContain("comments")
+
+      app.setup.renderer.resize(30, 12)
+      await app.setup.renderOnce()
+
+      await clickRenderable(app, "x-footer-bindings")
+      await app.setup.waitForFrame((frame) => frame.includes("BINDINGS") && frame.includes("ACTIVE · TIMELINE"))
+      const bindingsList = getScrollBox(app, "x-bindings-list")
+      expect(bindingsList.scrollHeight).toBeGreaterThan(bindingsList.viewport.height)
+      bindingsList.scrollTo(100_000)
+      await app.setup.renderOnce()
+      expect(bindingsList.scrollTop).toBeGreaterThan(0)
+      app.setup.mockInput.pressEscape()
+      expect(app.setup.renderer.currentFocusedRenderable?.id).toBe("x-feed")
+
+      app.api.assertDone()
+      expectHealthy(app)
+    } finally {
+      await app.close()
+    }
+  })
+
+  test("shows configured active bindings in every application context", async () => {
+    const app = await createApp(30, {
+      config: {
+        scrollbar: false,
+        keybindings: { ...DEFAULT_KEYBINDINGS, "app.bindings": "f1" },
+      },
+    })
+    app.api.expectUser("bindings-token", {
+      body: { data: { id: "42", name: "Reader", username: "reader" } },
+    })
+    app.api.expectTimeline("bindings-token", "42", {
+      body: {
+        data: [{ id: "7211", text: "Bindings root", attachments: { media_keys: ["bindings-photo"] } }],
+        includes: {
+          media: [{ media_key: "bindings-photo", type: "photo", url: RED_PNG_DATA_URL, width: 1, height: 1 }],
+        },
+        meta: {},
+      },
+    })
+    app.api.expectComments("bindings-token", "7211", {
+      body: { data: [{ id: "7212", text: "Bindings reply" }], meta: {} },
+    })
+
+    const bindingKey = (command: string) => {
+      const id = `x-bindings-key-${command.replaceAll(".", "-")}`
+      return (app.setup.renderer.root.findDescendantById(id) as TextRenderable | undefined)?.plainText
+    }
+
+    try {
+      await app.setup.waitForFrame((frame) => frame.includes("CONNECT X"))
+      app.setup.mockInput.pressKey("F1")
+      await app.setup.waitForFrame((frame) => frame.includes("BINDINGS") && frame.includes("ACTIVE · DIALOG"))
+      expect(bindingKey("app.bindings")).toBe("F1")
+      expect(bindingKey("x.feed.next")).toBeUndefined()
+      app.setup.mockInput.pressEscape()
+      expect(app.setup.renderer.currentFocusedRenderable?.id).toBe("x-connection-select")
+
+      app.setup.mockInput.pressEnter()
+      await app.setup.waitForFrame((frame) => frame.includes("OFFICIAL X API"))
+      expect(app.setup.renderer.currentFocusedRenderable?.id).toBe("x-official-token-input")
+      app.setup.mockInput.pressKey("F1")
+      await app.setup.waitForFrame((frame) => frame.includes("ACTIVE · DIALOG"))
+      app.setup.mockInput.pressKey("F1")
+      expect(app.setup.renderer.currentFocusedRenderable?.id).toBe("x-official-token-input")
+
+      await app.setup.mockInput.typeText("bindings-token")
+      app.setup.mockInput.pressEnter()
+      const timelineFrame = await waitForApiFrame(app, 2, (frame) => frame.includes("Bindings root"))
+      expect(timelineFrame).toContain("[F1]")
+      app.setup.mockInput.pressKey("F1")
+      await app.setup.waitForFrame((frame) => frame.includes("ACTIVE · TIMELINE"))
+      expect(bindingKey("app.bindings")).toBe("F1")
+      expect(bindingKey("x.feed.comments")).toBe("C")
+      expect(bindingKey("x.feed.refresh")).toBe("R")
+      expect(bindingKey("x.comments.back")).toBeUndefined()
+      app.setup.mockInput.pressEscape()
+      expect(app.setup.renderer.currentFocusedRenderable?.id).toBe("x-feed")
+
+      app.setup.mockInput.pressKey("c")
+      await waitForApiFrame(app, 3, (frame) => frame.includes("1 comment · end of comments"))
+      app.setup.mockInput.pressKey("F1")
+      await app.setup.waitForFrame((frame) => frame.includes("ACTIVE · COMMENTS"))
+      expect(bindingKey("x.comments.next")).toBe("J")
+      expect(bindingKey("x.comments.back")).toBe("ESC")
+      expect(bindingKey("x.feed.refresh")).toBeUndefined()
+      app.setup.mockInput.pressEscape()
+      expect(app.setup.renderer.currentFocusedRenderable?.id).toBe("x-comments-feed")
+
+      app.setup.mockInput.pressKey("i")
+      await app.setup.waitForFrame((frame) => frame.includes("IMAGE · 100%"))
+      app.setup.mockInput.pressKey("F1")
+      await app.setup.waitForFrame((frame) => frame.includes("ACTIVE · IMAGE"))
+      expect(bindingKey("x.image.zoom-in")).toBe("+")
+      expect(bindingKey("x.image.pan-right")).toBe("H")
+      expect(bindingKey("x.feed.comments")).toBeUndefined()
+      app.setup.mockInput.pressEscape()
+      expect(app.setup.renderer.currentFocusedRenderable?.id).toBe("x-image-view")
+      app.setup.mockInput.pressEscape()
+
+      app.api.assertDone()
+      expectHealthy(app)
+    } finally {
+      await app.close()
+    }
+  })
+
+  test("falls back when the bindings key conflicts with the current view", async () => {
+    const app = await createApp(18, {
+      config: {
+        scrollbar: false,
+        keybindings: { ...DEFAULT_KEYBINDINGS, "app.bindings": "c" },
+      },
+    })
+    app.api.expectUser("bindings-conflict-token", {
+      body: { data: { id: "42", name: "Reader", username: "reader" } },
+    })
+    app.api.expectTimeline("bindings-conflict-token", "42", {
+      body: { data: [{ id: "7221", text: "Conflicting bindings" }], meta: {} },
+    })
+
+    try {
+      expect((app.setup.renderer.console as unknown as { isVisible: boolean }).isVisible).toBe(true)
+      app.setup.mockInput.pressKey("`")
+      await app.setup.waitForFrame((frame) => frame.includes("CONNECT X"))
+      await loginOfficial(app, "bindings-conflict-token")
+      const frame = await waitForApiFrame(app, 2, (value) => value.includes("Conflicting bindings"))
+      expect(frame).toContain("[?]")
+      expect(frame).toContain("C comments")
+      expect(app.setup.renderer.root.findDescendantById("x-footer-comments")).toBeDefined()
+
+      app.setup.mockInput.pressKey("?")
+      await app.setup.waitForFrame((value) => value.includes("ACTIVE · TIMELINE"))
+      const helpKey = app.setup.renderer.root.findDescendantById("x-bindings-key-app-bindings") as TextRenderable
+      expect(helpKey.plainText).toBe("?")
+      const commentsKey = app.setup.renderer.root.findDescendantById("x-bindings-key-x-feed-comments") as TextRenderable
+      expect(commentsKey.plainText).toBe("C")
+      app.setup.mockInput.pressEscape()
+      expect(app.setup.renderer.currentFocusedRenderable?.id).toBe("x-feed")
+      expect(app.api.requests).toHaveLength(2)
 
       app.api.assertDone()
       expectHealthy(app)
@@ -769,7 +938,7 @@ describe("xtui application", () => {
       expect(openedUrls).toEqual([])
       expect(getCard(app, "7101").backgroundColor.toInts()).toEqual([8, 8, 8, 255])
       expect(getCard(app, "7102").backgroundColor.toInts()).toEqual([22, 24, 28, 255])
-      await clickRenderable(app, "x-footer-open")
+      expect(app.setup.renderer.root.findDescendantById("x-footer-open")).toBeUndefined()
       expect(openedUrls).toEqual([])
 
       await clickRenderable(app, "x-post-toggle-7102")
@@ -781,7 +950,7 @@ describe("xtui application", () => {
       await app.setup.waitForFrame((frame) => frame.includes("The documented X API exposes Following only"))
       expect(app.api.requests).toHaveLength(2)
 
-      await clickRenderable(app, "x-footer-refresh")
+      app.setup.mockInput.pressKey("r")
       await app.setup.waitForFrame((frame) => frame.includes("Refresh cooldown"))
       expect(app.api.requests).toHaveLength(2)
 
@@ -795,15 +964,15 @@ describe("xtui application", () => {
       expect(app.setup.renderer.currentFocusedRenderable?.id).toBe("x-feed")
       expect(getCard(app, "7102").backgroundColor.toInts()).toEqual([22, 24, 28, 255])
 
-      await clickRenderable(app, "x-footer-session")
+      app.setup.mockInput.pressKey("a")
       await app.setup.waitForFrame((frame) => frame.includes("CONNECT X"))
       expect(app.setup.renderer.currentFocusedRenderable?.id).toBe("x-connection-select")
       await clickRenderable(app, "x-connection-hint-back")
       await app.setup.waitForFrame((frame) => frame.includes("First mouse post") && !frame.includes("CONNECT X"))
 
-      await clickRenderable(app, "x-footer-logs")
+      app.setup.mockInput.pressKey("`")
       expect(app.setup.renderer.console.visible).toBe(true)
-      await clickRenderable(app, "x-footer-logs")
+      app.setup.mockInput.pressKey("`")
       expect(app.setup.renderer.console.visible).toBe(false)
 
       app.api.assertDone()
@@ -1434,7 +1603,8 @@ describe("xtui application", () => {
       )
       expect(headingRows.every((row) => row >= 0)).toBe(true)
       expect(new Set(headingRows).size).toBe(1)
-      expect(commentsFrames[0]).toContain("J/K select   O open   I image   ESC back")
+      expect(commentsFrames[0]).toContain("ESC back   I image")
+      expect(commentsFrames[0]).toContain("[?]")
 
       releaseComments.resolve()
       await app.api.waitForResponseCount(3)
@@ -1524,7 +1694,8 @@ describe("xtui application", () => {
       releaseFinalPage.resolve()
       const completedFrame = await waitForApiFrame(app, 5, (frame) => frame.includes("2 comments · end of comments"))
       expect(completedFrame).toContain("Second direct reply")
-      expect(completedFrame).toContain("J/K select   O open   I image   ESC back")
+      expect(completedFrame).toContain("ESC back   I image")
+      expect(completedFrame).toContain("[?]")
       expect(app.setup.renderer.root.findDescendantById("x-comment-101")).toBeDefined()
       expect(app.setup.renderer.root.findDescendantById("x-comment-102")).toBeDefined()
       const firstCommentCard = app.setup.renderer.root.findDescendantById("x-comment-101") as BoxRenderable

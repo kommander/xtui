@@ -63,6 +63,7 @@ After you choose a browser, xtui remembers only that browser's ID and tries its 
 | `O`           | Open the selected post or comment on x.com |
 | `R`           | Refresh                                    |
 | `A`           | Change authentication/session              |
+| `?`           | Show active keybindings                    |
 | `Escape`      | Return from comments or nested setup views |
 | `` ` ``       | Toggle OpenTUI's captured console/log view |
 | `Ctrl+C`      | Quit                                       |
@@ -97,6 +98,8 @@ There are no project-local files or merged configuration layers. Unknown or inva
 
 Every application command can be rebound to one OpenTUI key stroke. Single keys and modifier chords such as `ctrl+q` are supported; multi-stroke sequences are rejected with a fallback to that command's default.
 
+`app.bindings` is global. It accepts `?` or a non-text key/chord such as `f1` or `ctrl+?`; printable custom keys, `escape`, and keys used by another command fall back to `?` so help never blocks text entry or another action.
+
 | Command                  | Default  |
 | ------------------------ | -------- |
 | `x.feed.next`            | `j`      |
@@ -123,6 +126,7 @@ Every application command can be rebound to one OpenTUI key stroke. Single keys 
 | `x.image.pan-right`      | `h`      |
 | `x.image.close`          | `escape` |
 | `x.modal.back`           | `escape` |
+| `app.bindings`           | `?`      |
 | `app.console`            | `` ` ``  |
 | `app.quit`               | `ctrl+c` |
 

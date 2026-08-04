@@ -78,6 +78,13 @@ describe("configuration", () => {
     expect(formatConfigIssue(result.path, result.issues[0]!)).toContain(`${result.path}:2:3`)
   })
 
+  test.each(["z", "escape", "Escape"])("rejects unsafe global bindings key %s", (binding) => {
+    const result = loadConfig(configFile(JSON.stringify({ keybindings: { "app.bindings": binding } })))
+
+    expect(result.issues).toHaveLength(1)
+    expect(result.config.keybindings["app.bindings"]).toBe(DEFAULT_KEYBINDINGS["app.bindings"])
+  })
+
   test("keeps the checked-in JSON Schema synchronized", () => {
     const checkedIn = JSON.parse(readFileSync(join(import.meta.dir, "..", "xtui.schema.json"), "utf8"))
     expect(checkedIn).toEqual(XTUI_CONFIG_JSON_SCHEMA)

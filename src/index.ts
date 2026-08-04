@@ -127,6 +127,36 @@ const IMAGE_COMMANDS = [
 ] as const satisfies readonly XtuiCommandName[]
 const APP_COMMANDS = ["app.quit", "app.console"] as const satisfies readonly XtuiCommandName[]
 
+const COMMAND_DETAILS = {
+  "x.feed.next": { title: "Next post", category: "Timeline", order: 10 },
+  "x.feed.previous": { title: "Previous post", category: "Timeline", order: 11 },
+  "x.feed.open": { title: "Open selected post", category: "Timeline", order: 12 },
+  "x.feed.image": { title: "View selected image", category: "Timeline", order: 13 },
+  "x.feed.comments": { title: "View comments", category: "Timeline", order: 14 },
+  "x.feed.refresh": { title: "Refresh timeline", category: "Timeline", order: 15 },
+  "x.feed.toggle-expanded": { title: "Show more / less", category: "Timeline", order: 16 },
+  "x.feed.switch-stream": { title: "Switch Home / Following", category: "Timeline", order: 17 },
+  "x.session.open": { title: "Change session", category: "Timeline", order: 18 },
+  "x.comments.next": { title: "Next item", category: "Comments", order: 20 },
+  "x.comments.previous": { title: "Previous item", category: "Comments", order: 21 },
+  "x.comments.open": { title: "Open selected post", category: "Comments", order: 22 },
+  "x.comments.image": { title: "View selected image", category: "Comments", order: 23 },
+  "x.comments.back": { title: "Back to timeline", category: "Comments", order: 24 },
+  "x.image.next": { title: "Next image", category: "Image", order: 30 },
+  "x.image.previous": { title: "Previous image", category: "Image", order: 31 },
+  "x.image.zoom-in": { title: "Zoom in", category: "Image", order: 32 },
+  "x.image.zoom-out": { title: "Zoom out", category: "Image", order: 33 },
+  "x.image.pan-left": { title: "Pan left", category: "Image", order: 34 },
+  "x.image.pan-down": { title: "Pan down", category: "Image", order: 35 },
+  "x.image.pan-up": { title: "Pan up", category: "Image", order: 36 },
+  "x.image.pan-right": { title: "Pan right", category: "Image", order: 37 },
+  "x.image.close": { title: "Close image", category: "Image", order: 38 },
+  "x.modal.back": { title: "Back", category: "Dialog", order: 40 },
+  "app.bindings": { title: "Show bindings", category: "Application", order: 50 },
+  "app.console": { title: "Toggle logs", category: "Application", order: 51 },
+  "app.quit": { title: "Quit", category: "Application", order: 52 },
+} as const satisfies Record<XtuiCommandName, { title: string; category: string; order: number }>
+
 interface CookieSource {
   id: BrowserSourceId
   label: string
@@ -546,6 +576,11 @@ let imageViewport: BoxRenderable | null = null
 let imageRenderable: ImageRenderable | null = null
 let imageHeaderText: TextRenderable | null = null
 let imageMetricsText: TextRenderable | null = null
+let bindingsOverlay: BoxRenderable | null = null
+let bindingsList: ScrollBoxRenderable | null = null
+let bindingsContextText: TextRenderable | null = null
+let bindingsCloseText: TextRenderable | null = null
+let bindingsReturnFocus: Renderable | null = null
 let imageTweet: TweetData | null = null
 let imageItems: TweetMedia[] = []
 let imageIndex = 0
@@ -1006,95 +1041,73 @@ function updateHeader(): void {
 }
 
 function addFooterItem(
+  destination: BoxRenderable,
   id: string,
   key: string,
   label: string,
   color: string = COLORS.accent,
   action?: () => void | boolean | Promise<void | boolean>,
+  compact: boolean = false,
 ): void {
-  if (!footer) return
-  const item = new TextRenderable(footer.ctx, {
+  const item = new TextRenderable(destination.ctx, {
     id,
-    content: t`${bold(fg(color)(key))} ${fg(COLORS.secondary)(label)}   `,
+    content: compact
+      ? t`${bold(fg(color)(`[${key}]`))} `
+      : t`${bold(fg(color)(key))} ${fg(COLORS.secondary)(label)}   `,
     height: 1,
     wrapMode: "none",
     selectable: false,
     flexShrink: 0,
   })
   if (action) makeClickable(item, action)
-  footer.add(item)
-}
-
-function addCompactFooterItem(
-  id: string,
-  label: string,
-  action: () => void | boolean | Promise<void | boolean>,
-  color: string = COLORS.accent,
-): void {
-  if (!footer) return
-  const item = new TextRenderable(footer.ctx, {
-    id,
-    content: t`${bold(fg(color)(label))} `,
-    height: 1,
-    wrapMode: "none",
-    selectable: false,
-    flexShrink: 0,
-  })
-  makeClickable(item, action)
-  footer.add(item)
+  destination.add(item)
 }
 
 function updateFooter(): void {
   if (!footer) return
   clearChildren(footer)
+  const actions = new BoxRenderable(footer.ctx, {
+    id: "x-footer-actions",
+    height: 1,
+    flexDirection: "row",
+    flexBasis: 0,
+    flexGrow: 1,
+    flexShrink: 1,
+    overflow: "hidden",
+  })
+  footer.add(actions)
   const terminalWidth = currentRenderer?.width ?? 100
-  if (terminalWidth < 82) {
-    if (currentView === "comments") {
-      addCompactFooterItem("x-footer-back", "back", closeCommentsView)
-      addCompactFooterItem("x-footer-image", "image", openImageView)
-      addCompactFooterItem("x-footer-logs", "logs", toggleConsole, COLORS.secondary)
-    } else {
-      addCompactFooterItem("x-footer-comments", "comments", openCommentsView)
-      if (terminalWidth >= 36) addCompactFooterItem("x-footer-image", "image", openImageView)
-      addCompactFooterItem(
-        "x-footer-refresh",
-        "refresh",
-        () => {
-          void refreshTimeline()
-        },
-        COLORS.green,
-      )
-      addCompactFooterItem("x-footer-session", "session", openSessionFlowFromFeed, COLORS.amber)
-      addCompactFooterItem("x-footer-logs", "logs", toggleConsole, COLORS.secondary)
-    }
-    return
-  }
+  const helpWidth = formatCommandKey("app.bindings").length + 2
   if (currentView === "comments") {
-    const selectionKeys = `${formatCommandKey("x.comments.next")}/${formatCommandKey("x.comments.previous")}`
-    addFooterItem("x-footer-comment-select", selectionKeys, "select")
-    addFooterItem("x-footer-comment-open", formatCommandKey("x.comments.open"), "open")
-    addFooterItem("x-footer-image", formatCommandKey("x.comments.image"), "image", COLORS.accent, openImageView)
-    addFooterItem("x-footer-back", formatCommandKey("x.comments.back"), "back", COLORS.accent, closeCommentsView)
-    addFooterItem("x-footer-logs", formatCommandKey("app.console"), "logs", COLORS.secondary, toggleConsole)
-    return
+    const backKey = formatCommandKey("x.comments.back")
+    const imageKey = formatCommandKey("x.comments.image")
+    const compact = backKey.length + imageKey.length + helpWidth + 17 > terminalWidth
+    const backFits = !compact || backKey.length + helpWidth + 3 <= terminalWidth
+    const imageFits = !compact || backKey.length + imageKey.length + helpWidth + 6 <= terminalWidth
+    if (backFits) addFooterItem(actions, "x-footer-back", backKey, "back", COLORS.accent, closeCommentsView, compact)
+    if (imageFits) addFooterItem(actions, "x-footer-image", imageKey, "image", COLORS.accent, openImageView, compact)
+  } else {
+    const commentsKey = formatCommandKey("x.feed.comments")
+    const imageKey = formatCommandKey("x.feed.image")
+    const compact = commentsKey.length + imageKey.length + helpWidth + 21 > terminalWidth
+    const commentsFits = !compact || commentsKey.length + helpWidth + 3 <= terminalWidth
+    const imageFits = !compact || commentsKey.length + imageKey.length + helpWidth + 6 <= terminalWidth
+    if (commentsFits)
+      addFooterItem(actions, "x-footer-comments", commentsKey, "comments", COLORS.accent, openCommentsView, compact)
+    if (imageFits) addFooterItem(actions, "x-footer-image", imageKey, "image", COLORS.accent, openImageView, compact)
   }
 
-  const selectionKeys = `${formatCommandKey("x.feed.next")}/${formatCommandKey("x.feed.previous")}`
-  addFooterItem("x-footer-select", selectionKeys, "select")
-  addFooterItem("x-footer-comments", formatCommandKey("x.feed.comments"), "comments", COLORS.accent, openCommentsView)
-  addFooterItem("x-footer-image", formatCommandKey("x.feed.image"), "image", COLORS.accent, openImageView)
-  addFooterItem("x-footer-open", formatCommandKey("x.feed.open"), "open")
-  addFooterItem("x-footer-refresh", formatCommandKey("x.feed.refresh"), "refresh", COLORS.green, () => {
-    void refreshTimeline()
+  const bindings = new TextRenderable(footer.ctx, {
+    id: "x-footer-bindings",
+    content: t`${bold(fg(COLORS.accent)(`[${formatCommandKey("app.bindings")}]`))}`,
+    height: 1,
+    marginLeft: "auto",
+    flexShrink: 0,
+    wrapMode: "none",
+    selectable: false,
   })
-  addFooterItem(
-    "x-footer-session",
-    formatCommandKey("x.session.open"),
-    "session",
-    COLORS.amber,
-    openSessionFlowFromFeed,
-  )
-  addFooterItem("x-footer-logs", formatCommandKey("app.console"), "logs", COLORS.secondary, toggleConsole)
+  makeClickable(bindings, toggleBindingsOverlay)
+  footer.add(bindings)
 }
 
 function timelineState(stream: TimelineStream = currentStream): TimelineStreamState | null {
@@ -1705,6 +1718,194 @@ function createImageView(renderer: CliRenderer): BoxRenderable {
   imageViewport.add(imageMetricsText)
   imageOverlay.add(imageViewport)
   return imageOverlay
+}
+
+function bindingsContext(): string {
+  if (authOverlay?.visible) return "DIALOG"
+  if (imageOverlay?.visible) return "IMAGE"
+  return currentView === "comments" ? "COMMENTS" : "TIMELINE"
+}
+
+function closeBindingsOverlay(): boolean {
+  if (!bindingsOverlay?.visible) return false
+  bindingsOverlay.visible = false
+  const returnFocus = bindingsReturnFocus
+  bindingsReturnFocus = null
+  if (returnFocus && !returnFocus.isDestroyed) returnFocus.focus()
+  else if (imageOverlay?.visible) imageOverlay.focus()
+  else if (authInput && !authInput.isDestroyed) authInput.focus()
+  else if (authSelect && !authSelect.isDestroyed) authSelect.focus()
+  else if (currentView === "comments") commentsFeed?.focus()
+  else feed?.focus()
+  return true
+}
+
+function openBindingsOverlay(): boolean {
+  if (
+    !bindingsOverlay ||
+    !bindingsList ||
+    !bindingsContextText ||
+    !bindingsCloseText ||
+    !activeKeymap ||
+    !currentRenderer
+  )
+    return false
+  const focused = currentRenderer.currentFocusedRenderable
+  const keysByCommand = new Map<XtuiCommandName, string[]>()
+  for (const active of activeKeymap.getActiveKeys()) {
+    if (typeof active.command !== "string" || !(active.command in COMMAND_DETAILS)) continue
+    const name = active.command as XtuiCommandName
+    if (
+      focused instanceof InputRenderable &&
+      (name === "app.quit" || name === "app.console" || name === "x.modal.back")
+    ) {
+      const stroke = activeKeymap.parseKeySequence(activeConfig.keybindings[name])[0]!.stroke
+      if (
+        !stroke.ctrl &&
+        !stroke.meta &&
+        !stroke.super &&
+        !stroke.hyper &&
+        (stroke.name.length === 1 || stroke.name === "space")
+      )
+        continue
+    }
+    const display = (active.display === "escape" ? "esc" : active.display).toUpperCase()
+    const keys = keysByCommand.get(name) ?? []
+    if (!keys.includes(display)) keys.push(display)
+    keysByCommand.set(name, keys)
+  }
+  const rows = [...keysByCommand.entries()]
+    .map(([name, keys]) => ({ name, key: keys.join("/"), ...COMMAND_DETAILS[name] }))
+    .sort((left, right) => left.order - right.order)
+
+  bindingsReturnFocus = focused
+  bindingsContextText.content = t`${bold(fg(COLORS.primary)(`ACTIVE · ${bindingsContext()}`))}  ${fg(COLORS.muted)(`${rows.length} commands`)}`
+  bindingsCloseText.content = t`${bold(fg(COLORS.accent)(`${formatCommandKey("app.bindings")} / ESC`))} ${fg(COLORS.secondary)("close")}`
+  clearChildren(bindingsList)
+  bindingsList.scrollTop = 0
+  const keyWidth = Math.min(18, Math.max(8, ...rows.map((row) => row.key.length + 2)))
+  let category = ""
+  for (const row of rows) {
+    if (row.category !== category) {
+      category = row.category
+      bindingsList.add(
+        new TextRenderable(bindingsList.ctx, {
+          id: `x-bindings-category-${category.toLowerCase()}`,
+          content: t`${bold(fg(COLORS.secondary)(category.toUpperCase()))}`,
+          height: 1,
+          marginTop: bindingsList.getChildren().length > 0 ? 1 : 0,
+          wrapMode: "none",
+          selectable: false,
+        }),
+      )
+    }
+    const item = new BoxRenderable(bindingsList.ctx, {
+      id: `x-bindings-row-${row.name.replaceAll(".", "-")}`,
+      width: "100%",
+      height: 1,
+      flexDirection: "row",
+      flexShrink: 0,
+    })
+    item.add(
+      new TextRenderable(bindingsList.ctx, {
+        id: `x-bindings-key-${row.name.replaceAll(".", "-")}`,
+        content: row.key,
+        width: keyWidth,
+        height: 1,
+        fg: COLORS.accent,
+        attributes: TextAttributes.BOLD,
+        wrapMode: "none",
+        selectable: false,
+      }),
+    )
+    item.add(
+      new TextRenderable(bindingsList.ctx, {
+        content: row.title,
+        height: 1,
+        flexGrow: 1,
+        fg: COLORS.primary,
+        wrapMode: "none",
+        selectable: false,
+      }),
+    )
+    bindingsList.add(item)
+  }
+
+  bindingsOverlay.visible = true
+  bindingsList.focus()
+  return true
+}
+
+function toggleBindingsOverlay(): boolean {
+  return bindingsOverlay?.visible ? closeBindingsOverlay() : openBindingsOverlay()
+}
+
+function createBindingsOverlay(renderer: CliRenderer): BoxRenderable {
+  bindingsOverlay = new BoxRenderable(renderer, {
+    id: "x-bindings-overlay",
+    position: "absolute",
+    left: 0,
+    top: 0,
+    width: "100%",
+    height: "100%",
+    zIndex: 300,
+    alignItems: "center",
+    justifyContent: "center",
+    backgroundColor: "#02050AF2",
+    focusable: true,
+    visible: false,
+  })
+  const modal = new BoxRenderable(renderer, {
+    id: "x-bindings-modal",
+    width: "86%",
+    maxWidth: 72,
+    height: "84%",
+    maxHeight: 32,
+    padding: 1,
+    flexDirection: "column",
+    border: true,
+    borderStyle: "double",
+    borderColor: COLORS.accent,
+    backgroundColor: COLORS.panel,
+    title: "BINDINGS",
+    titleAlignment: "center",
+  })
+  bindingsContextText = new TextRenderable(renderer, {
+    id: "x-bindings-context",
+    content: "",
+    width: "100%",
+    height: 1,
+    marginBottom: 1,
+    wrapMode: "none",
+    selectable: false,
+  })
+  bindingsList = new ScrollBoxRenderable(renderer, {
+    id: "x-bindings-list",
+    width: "100%",
+    flexGrow: 1,
+    scrollX: false,
+    scrollY: true,
+    viewportCulling: true,
+    rootOptions: { backgroundColor: COLORS.panel },
+    viewportOptions: { backgroundColor: COLORS.panel },
+    contentOptions: { flexDirection: "column", backgroundColor: COLORS.panel },
+  })
+  bindingsList.verticalScrollBar.visible = activeConfig.scrollbar
+  bindingsCloseText = new TextRenderable(renderer, {
+    id: "x-bindings-close",
+    content: "",
+    width: "100%",
+    height: 1,
+    marginTop: 1,
+    wrapMode: "none",
+    selectable: false,
+  })
+  makeClickable(bindingsCloseText, closeBindingsOverlay)
+  modal.add(bindingsContextText)
+  modal.add(bindingsList)
+  modal.add(bindingsCloseText)
+  bindingsOverlay.add(modal)
+  return bindingsOverlay
 }
 
 function addPostAuthor(card: BoxRenderable, tweet: TweetData, postIndex: number, idPrefix: string = "x-post"): void {
@@ -3120,6 +3321,43 @@ function registerXKeymap(renderer: CliRenderer): ConfigIssue[] {
       activeConfig.keybindings[command] = fallback
     }
   }
+  const commandNames = Object.keys(DEFAULT_KEYBINDINGS) as XtuiCommandName[]
+  const bindingMatch = (command: XtuiCommandName) =>
+    keymap.parseKeySequence(activeConfig.keybindings[command])[0]!.match
+  const helpDefault = DEFAULT_KEYBINDINGS["app.bindings"]
+  const helpConflicts = commandNames.filter(
+    (command) => command !== "app.bindings" && bindingMatch(command) === bindingMatch("app.bindings"),
+  )
+  const helpPart = keymap.parseKeySequence(activeConfig.keybindings["app.bindings"])[0]!
+  const helpUsesEscape = helpPart.match === keymap.parseKeySequence("escape")[0]!.match
+  const helpUsesCustomText =
+    activeConfig.keybindings["app.bindings"] !== helpDefault &&
+    !helpPart.stroke.ctrl &&
+    !helpPart.stroke.meta &&
+    !helpPart.stroke.super &&
+    !helpPart.stroke.hyper &&
+    (helpPart.stroke.name.length === 1 || helpPart.stroke.name === "space")
+  if (
+    helpUsesEscape ||
+    helpUsesCustomText ||
+    (activeConfig.keybindings["app.bindings"] !== helpDefault && helpConflicts.length > 0)
+  ) {
+    configIssues.push({
+      path: "/keybindings/app.bindings",
+      message: `${helpUsesEscape ? "Escape closes the bindings dialog" : helpUsesCustomText ? "Printable keys are reserved for text input" : `Conflicts with ${helpConflicts.join(", ")}`}; using default ${JSON.stringify(helpDefault)}`,
+    })
+    activeConfig.keybindings["app.bindings"] = helpDefault
+  }
+  const finalHelpMatch = bindingMatch("app.bindings")
+  for (const command of commandNames) {
+    if (command === "app.bindings" || bindingMatch(command) !== finalHelpMatch) continue
+    const fallback = DEFAULT_KEYBINDINGS[command]
+    configIssues.push({
+      path: `/keybindings/${command}`,
+      message: `Conflicts with global app.bindings; using default ${JSON.stringify(fallback)}`,
+    })
+    activeConfig.keybindings[command] = fallback
+  }
   keymapDisposers.push(
     keymap.registerLayer({
       commands: [
@@ -3142,6 +3380,12 @@ function registerXKeymap(renderer: CliRenderer): ConfigIssue[] {
           run({ event }) {
             if (isUnmodifiedTextInput(event)) return false
             toggleConsole()
+          },
+        },
+        {
+          name: "app.bindings",
+          run() {
+            return toggleBindingsOverlay()
           },
         },
         {
@@ -3294,7 +3538,22 @@ function registerXKeymap(renderer: CliRenderer): ConfigIssue[] {
     keymap.registerLayer({
       bindings: commandBindings(configuredBindings(APP_COMMANDS)),
     }),
+    keymap.registerLayer({
+      priority: 15_000,
+      bindings: commandBindings(configuredBindings(["app.bindings"])),
+    }),
   )
+
+  if (bindingsOverlay) {
+    keymapDisposers.push(
+      keymap.registerLayer({
+        priority: 20_000,
+        target: bindingsOverlay,
+        targetMode: "focus-within",
+        bindings: [{ key: "escape", cmd: closeBindingsOverlay }],
+      }),
+    )
+  }
 
   for (const state of timelineStreams.values()) {
     keymapDisposers.push(
@@ -3790,6 +4049,7 @@ export function run(renderer: CliRenderer, options: XDemoRunOptions = {}): void 
   imagePanY = 0
   imageMessage = ""
   imageFallbackSource = null
+  bindingsReturnFocus = null
   detectedBrowserOverride = options.detectedBrowsers ? [...options.detectedBrowsers] : null
   xApiBaseUrl = options.xApiBaseUrl?.replace(/\/+$/, "") || X_API_BASE_URL
   twitterClientFactory = options.twitterClientFactory ?? ((clientOptions) => new TwitterClient(clientOptions))
@@ -3896,6 +4156,7 @@ export function run(renderer: CliRenderer, options: XDemoRunOptions = {}): void 
   commentsScrollListener = loadCommentsNearBottom
   commentsFeed.verticalScrollBar.on("change", commentsScrollListener)
   const imageView = createImageView(renderer)
+  const bindingsView = createBindingsOverlay(renderer)
   const keybindingIssues = registerXKeymap(renderer)
   updateHeader()
 
@@ -3949,6 +4210,7 @@ export function run(renderer: CliRenderer, options: XDemoRunOptions = {}): void 
   root.add(footer)
   renderer.root.add(root)
   renderer.root.add(imageView)
+  renderer.root.add(bindingsView)
   homeState.feed.focus()
   const rememberedSourceId = loadRememberedBrowserSource()
   const rememberedSource = rememberedSourceId
@@ -3990,6 +4252,7 @@ export function destroy(): void {
   imageItems = []
   imageMessage = ""
   imageFallbackSource = null
+  bindingsReturnFocus = null
   loadingActivities.clear()
 
   while (keymapDisposers.length > 0) keymapDisposers.pop()?.()
@@ -4002,6 +4265,7 @@ export function destroy(): void {
   commentsScrollListener = null
   resizeListener = null
   if (imageRenderable) imageRenderable.source = undefined
+  bindingsOverlay?.destroyRecursively()
   imageOverlay?.destroyRecursively()
   for (const state of timelineStreams.values()) state.feed.destroyRecursively()
   commentsFeed?.destroyRecursively()
@@ -4019,6 +4283,10 @@ export function destroy(): void {
   imageRenderable = null
   imageHeaderText = null
   imageMetricsText = null
+  bindingsOverlay = null
+  bindingsList = null
+  bindingsContextText = null
+  bindingsCloseText = null
   statusText = null
   headerText = null
   headerHomeText = null
