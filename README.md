@@ -59,6 +59,7 @@ After you choose a browser, xtui remembers only that browser's ID and tries its 
 | `Tab`         | Switch Home/Following when available       |
 | `E`           | Show more/less for the selected long post  |
 | `C`           | Show direct comments for the selected post |
+| `I`           | Open the selected tweet's first image      |
 | `O`           | Open the selected post or comment on x.com |
 | `R`           | Refresh                                    |
 | `A`           | Change authentication/session              |
@@ -66,7 +67,9 @@ After you choose a browser, xtui remembers only that browser's ID and tries its 
 | `` ` ``       | Toggle OpenTUI's captured console/log view |
 | `Ctrl+C`      | Quit                                       |
 
-With a mouse, click posts or comments to select them, click visible action labels and Show More/Less links, and use the wheel or scrollbar to scroll. Opening a selected post or comment on x.com remains keyboard-only with `O`.
+In the image view, use `Left` / `Right` to move between images, `+` / `-` to zoom, `H` / `J` / `K` / `L` to pan, and `Escape` to return.
+
+With a mouse, click posts or comments to select them, click an image to open it, click visible action labels and Show More/Less links, and use the wheel or scrollbar to scroll. Opening a selected post or comment on x.com remains keyboard-only with `O`.
 
 Image failures are logged to OpenTUI's console with sanitized URLs, post/media context, error code, HTTP status, cause, and stack. Press backtick to inspect them.
 

@@ -3,6 +3,7 @@ import {
   BoxRenderable,
   CliRenderEvents,
   ConsolePosition,
+  ImageRenderable,
   ScrollBoxRenderable,
   TextAttributes,
   type CliRendererErrorEvent,
@@ -34,6 +35,9 @@ const COMMENTS_QUERY = {
 } as const
 const RED_PNG_DATA_URL =
   "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR4AWP4z8DwHwAFAAH/e+m+7wAAAABJRU5ErkJggg=="
+const BLUE_PNG_DATA_URL =
+  "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII="
+const BROKEN_IMAGE_DATA_URL = "data:text/plain;base64,bm90IGFuIGltYWdl"
 
 interface JsonReply {
   body: unknown
@@ -311,6 +315,12 @@ function getScrollBox(app: AppHarness, id: string): ScrollBoxRenderable {
   return scrollBox as ScrollBoxRenderable
 }
 
+function getImage(app: AppHarness, id: string): ImageRenderable {
+  const image = app.setup.renderer.root.findDescendantById(id)
+  expect(image).toBeInstanceOf(ImageRenderable)
+  return image as ImageRenderable
+}
+
 async function clickRenderable(app: AppHarness, id: string, clipId?: string): Promise<void> {
   await app.setup.renderOnce()
   const target = app.setup.renderer.root.findDescendantById(id)
@@ -441,9 +451,15 @@ describe("xtui application", () => {
       await app.setup.mockInput.typeText("narrow-token")
       await clickRenderable(app, "x-official-token-hint-submit")
       const timelineFrame = await waitForApiFrame(app, 2, (frame) => frame.includes("Narrow timeline"))
-      expect(timelineFrame).toContain("comments refresh session logs")
+      expect(timelineFrame).toContain("comments image refresh session logs")
       expect(timelineFrame).not.toContain("CTRL+C quit")
       expect(app.setup.renderer.root.findDescendantById("x-footer-quit")).toBeUndefined()
+
+      app.setup.renderer.resize(30, 12)
+      await app.setup.renderOnce()
+      const extraNarrowFrame = app.setup.captureCharFrame()
+      expect(extraNarrowFrame).toContain("comments refresh session logs")
+      expect(app.setup.renderer.root.findDescendantById("x-footer-image")).toBeUndefined()
 
       app.api.assertDone()
       expectHealthy(app)
@@ -522,6 +538,10 @@ describe("xtui application", () => {
       expect(frame).toContain("↻ 1.2K")
       expect(frame).toContain("2 Following posts · X API v2 · read-only · 99 API requests remaining")
       expect(frame).not.toContain("https://t.co/quoted")
+      expect(app.setup.renderer.currentFocusedRenderable?.id).toBe("x-feed")
+      app.setup.mockInput.pressKey("i")
+      await app.setup.renderOnce()
+      expect(app.setup.renderer.root.findDescendantById("x-image-view")?.visible).toBe(false)
       expect(app.setup.renderer.currentFocusedRenderable?.id).toBe("x-feed")
 
       expect(getCard(app, "1001").backgroundColor.toInts()).toEqual([22, 24, 28, 255])
@@ -768,6 +788,238 @@ describe("xtui application", () => {
     }
   })
 
+  test("opens, navigates, zooms, pans, and closes the image view", async () => {
+    const app = await createApp(50)
+    app.api.expectUser("image-view-token", {
+      body: { data: { id: "42", name: "Reader", username: "reader" } },
+    })
+    app.api.expectTimeline("image-view-token", "42", {
+      body: {
+        data: [
+          {
+            id: "7201",
+            text: "Two image post",
+            attachments: { media_keys: ["photo-1", "photo-2", "video-1"] },
+            public_metrics: { reply_count: 7, quote_count: 3, retweet_count: 5, like_count: 9 },
+          },
+        ],
+        includes: {
+          media: [
+            {
+              media_key: "photo-1",
+              type: "photo",
+              url: RED_PNG_DATA_URL,
+              preview_image_url: BLUE_PNG_DATA_URL,
+              width: 1,
+              height: 1,
+            },
+            {
+              media_key: "photo-2",
+              type: "photo",
+              url: BROKEN_IMAGE_DATA_URL,
+              preview_image_url: BLUE_PNG_DATA_URL,
+              width: 1,
+              height: 1,
+            },
+            { media_key: "video-1", type: "video", preview_image_url: RED_PNG_DATA_URL, width: 1, height: 1 },
+          ],
+        },
+        meta: {},
+      },
+    })
+
+    try {
+      await app.setup.waitForFrame((frame) => frame.includes("CONNECT X"))
+      await loginOfficial(app, "image-view-token")
+      await waitForApiFrame(app, 2, (frame) => frame.includes("Two image post"))
+      await app.setup.flush({ maxPasses: 50 })
+
+      app.setup.mockInput.pressKey("i")
+      const firstFrame = await app.setup.waitForFrame((frame) => frame.includes("IMAGE · 1/2 · 100%"))
+      expect(firstFrame).toContain("7 replies   3 quotes   9 likes")
+      expect(firstFrame).not.toContain("FOLLOWING  TAB SWITCH")
+      const overlay = app.setup.renderer.root.findDescendantById("x-image-view")
+      const appRoot = app.setup.renderer.root.findDescendantById("x-demo-root")
+      const image = getImage(app, "x-image-view-image")
+      expect(overlay?.visible).toBe(true)
+      expect(appRoot?.visible).toBe(false)
+      expect(app.setup.renderer.currentFocusedRenderable?.id).toBe("x-image-view")
+      expect(image.source).toBe(RED_PNG_DATA_URL)
+      await image.loadPromise
+      await app.setup.flush({ maxPasses: 50 })
+
+      app.setup.renderer.resize(80, 30)
+      await app.setup.renderOnce()
+      const resizedViewport = app.setup.renderer.root.findDescendantById("x-image-viewport")
+      expect(resizedViewport?.width).toBe(80)
+      expect(resizedViewport?.height).toBe(28)
+      expect(image.width).toBe(80)
+      app.setup.renderer.resize(100, 50)
+      await app.setup.renderOnce()
+
+      const fittedWidth = image.width
+      app.setup.mockInput.pressKey("+")
+      await app.setup.renderOnce()
+      expect(image.width).toBeGreaterThan(fittedWidth)
+      app.setup.mockInput.pressKey("-")
+      await app.setup.renderOnce()
+      expect(image.width).toBe(fittedWidth)
+
+      for (let step = 0; step < 12; step += 1) app.setup.mockInput.pressKey("+")
+      await app.setup.renderOnce()
+      const centeredLeft = Number(image.left)
+      const centeredTop = Number(image.top)
+      app.setup.mockInput.pressKey("h")
+      app.setup.mockInput.pressKey("j")
+      await app.setup.renderOnce()
+      expect(Number(image.left)).toBeLessThan(centeredLeft)
+      expect(Number(image.top)).toBeGreaterThan(centeredTop)
+
+      for (let step = 0; step < 100; step += 1) app.setup.mockInput.pressKey("h")
+      for (let step = 0; step < 100; step += 1) app.setup.mockInput.pressKey("j")
+      await app.setup.renderOnce()
+      const viewport = app.setup.renderer.root.findDescendantById("x-image-viewport")!
+      const fitted = image.getFittedSize(image.width, image.height)
+      const fittedLeft = Number(image.left) + Math.floor((image.width - fitted.width) / 2)
+      const fittedTop = Number(image.top) + Math.floor((image.height - fitted.height) / 2)
+      expect(fittedLeft + fitted.width).toBe(viewport.width)
+      expect(fittedTop).toBe(0)
+
+      app.setup.mockInput.pressArrow("right")
+      const secondFrame = await app.setup.waitForFrame((frame) => frame.includes("IMAGE · 2/2 · 100%"))
+      expect(secondFrame).toContain("7 replies   3 quotes   9 likes")
+      for (let pass = 0; pass < 20 && image.source !== BLUE_PNG_DATA_URL; pass += 1) {
+        await Bun.sleep(0)
+        await app.setup.renderOnce()
+      }
+      expect(image.source).toBe(BLUE_PNG_DATA_URL)
+      expect(image.width).toBe(fittedWidth)
+
+      app.setup.mockInput.pressArrow("left")
+      await app.setup.waitForFrame((frame) => frame.includes("IMAGE · 1/2 · 100%"))
+      expect(image.source).toBe(RED_PNG_DATA_URL)
+
+      app.setup.mockInput.pressEscape()
+      await app.setup.renderOnce()
+      expect(overlay?.visible).toBe(false)
+      expect(appRoot?.visible).toBe(true)
+      expect(app.setup.renderer.currentFocusedRenderable?.id).toBe("x-feed")
+
+      await clickRenderable(app, "x-post-media-image-0-1", "x-feed")
+      await app.setup.waitForFrame((frame) => frame.includes("IMAGE · 2/2 · 100%"))
+      for (let pass = 0; pass < 20 && image.source !== BLUE_PNG_DATA_URL; pass += 1) {
+        await Bun.sleep(0)
+        await app.setup.renderOnce()
+      }
+      expect(image.source).toBe(BLUE_PNG_DATA_URL)
+      app.setup.mockInput.pressEscape()
+
+      app.api.assertDone()
+      expectHealthy(app)
+    } finally {
+      await app.close()
+    }
+  })
+
+  test("opens the selected comment image and returns to comments", async () => {
+    const app = await createApp(30)
+    app.api.expectUser("comment-image-token", {
+      body: { data: { id: "42", name: "Reader", username: "reader" } },
+    })
+    app.api.expectTimeline("comment-image-token", "42", {
+      body: { data: [{ id: "7251", text: "Root post" }], meta: {} },
+    })
+    app.api.expectComments("comment-image-token", "7251", {
+      body: {
+        data: [
+          {
+            id: "7252",
+            text: "Reply with image",
+            attachments: { media_keys: ["reply-photo"] },
+            public_metrics: { reply_count: 2, quote_count: 4, retweet_count: 6, like_count: 8 },
+          },
+        ],
+        includes: {
+          media: [{ media_key: "reply-photo", type: "photo", url: BLUE_PNG_DATA_URL, width: 1, height: 1 }],
+        },
+        meta: {},
+      },
+    })
+
+    try {
+      await app.setup.waitForFrame((frame) => frame.includes("CONNECT X"))
+      await loginOfficial(app, "comment-image-token")
+      await waitForApiFrame(app, 2, (frame) => frame.includes("Root post"))
+      app.setup.mockInput.pressKey("c")
+      await waitForApiFrame(app, 3, (frame) => frame.includes("Reply with image"))
+
+      app.setup.mockInput.pressKey("i")
+      const imageFrame = await app.setup.waitForFrame((frame) => frame.includes("IMAGE · 100%"))
+      expect(imageFrame).toContain("2 replies   4 quotes   8 likes")
+      expect(getImage(app, "x-image-view-image").source).toBe(BLUE_PNG_DATA_URL)
+
+      app.setup.mockInput.pressEscape()
+      const commentsFrame = await app.setup.waitForFrame((frame) => frame.includes("Reply with image"))
+      expect(commentsFrame).toContain("COMMENTS  DIRECT REPLIES")
+      expect(app.setup.renderer.currentFocusedRenderable?.id).toBe("x-comments-feed")
+
+      app.api.assertDone()
+      expectHealthy(app)
+    } finally {
+      await app.close()
+    }
+  })
+
+  test("does not open an image while comments are still preparing", async () => {
+    const app = await createApp(30)
+    const commentsRequested = deferred<void>()
+    const releaseComments = deferred<void>()
+    app.api.expectUser("image-race-token", {
+      body: { data: { id: "42", name: "Reader", username: "reader" } },
+    })
+    app.api.expectTimeline("image-race-token", "42", {
+      body: {
+        data: [{ id: "7261", text: "Root image", attachments: { media_keys: ["root-photo"] } }],
+        includes: {
+          media: [{ media_key: "root-photo", type: "photo", url: RED_PNG_DATA_URL, width: 1, height: 1 }],
+        },
+        meta: {},
+      },
+    })
+    app.api.expectComments("image-race-token", "7261", async () => {
+      commentsRequested.resolve()
+      await releaseComments.promise
+      return { body: { data: [], meta: {} } }
+    })
+
+    try {
+      await app.setup.waitForFrame((frame) => frame.includes("CONNECT X"))
+      await loginOfficial(app, "image-race-token")
+      await waitForApiFrame(app, 2, (frame) => frame.includes("Root image"))
+
+      app.setup.mockInput.pressKey("c")
+      app.setup.mockInput.pressKey("i")
+      await app.setup.renderOnce()
+      expect(app.setup.renderer.root.findDescendantById("x-image-view")?.visible).toBe(false)
+
+      await commentsRequested.promise
+      await app.setup.waitForFrame((frame) => frame.includes("COMMENTS  DIRECT REPLIES"))
+      expect(app.setup.renderer.currentFocusedRenderable?.id).toBe("x-comments-feed")
+      app.setup.mockInput.pressKey("i")
+      await app.setup.waitForFrame((frame) => frame.includes("IMAGE · 100%"))
+      expect(app.setup.renderer.root.findDescendantById("x-image-view")?.visible).toBe(true)
+      app.setup.mockInput.pressEscape()
+
+      releaseComments.resolve()
+      await app.api.waitForResponseCount(3)
+      app.api.assertDone()
+      expectHealthy(app)
+    } finally {
+      releaseComments.resolve()
+      await app.close()
+    }
+  })
+
   test("reveals comments only after their media layout is stable", async () => {
     const app = await createApp(36)
     const commentsRequested = deferred<void>()
@@ -820,7 +1072,7 @@ describe("xtui application", () => {
       )
       expect(headingRows.every((row) => row >= 0)).toBe(true)
       expect(new Set(headingRows).size).toBe(1)
-      expect(commentsFrames[0]).toContain("J/K select   O open   ESC back")
+      expect(commentsFrames[0]).toContain("J/K select   O open   I image   ESC back")
 
       releaseComments.resolve()
       await app.api.waitForResponseCount(3)
@@ -910,7 +1162,7 @@ describe("xtui application", () => {
       releaseFinalPage.resolve()
       const completedFrame = await waitForApiFrame(app, 5, (frame) => frame.includes("2 comments · end of comments"))
       expect(completedFrame).toContain("Second direct reply")
-      expect(completedFrame).toContain("J/K select   O open   ESC back")
+      expect(completedFrame).toContain("J/K select   O open   I image   ESC back")
       expect(app.setup.renderer.root.findDescendantById("x-comment-101")).toBeDefined()
       expect(app.setup.renderer.root.findDescendantById("x-comment-102")).toBeDefined()
       const firstCommentCard = app.setup.renderer.root.findDescendantById("x-comment-101") as BoxRenderable

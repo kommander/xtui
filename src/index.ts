@@ -76,6 +76,12 @@ const COOKIE_REFRESH_COOLDOWN_MS = 60_000
 const REQUEST_TIMEOUT_MS = 20_000
 const MEDIA_MIN_ROWS = 5
 const MEDIA_MAX_ROWS = 18
+const IMAGE_ZOOM_STEP = 0.25
+const IMAGE_MIN_ZOOM = 0.5
+const IMAGE_MAX_ZOOM = 4
+const IMAGE_PAN_COLUMNS = 2
+const IMAGE_PAN_ROWS = 1
+const IMAGE_CHROME_ROWS = 2
 const POST_PREVIEW_GRAPHEMES = 280
 const X_API_BASE_URL = "https://api.x.com"
 const COMMENTS_PAGE_SIZE = 100
@@ -83,6 +89,7 @@ const FEED_BINDINGS = {
   "x.feed.next": "j",
   "x.feed.previous": "k",
   "x.feed.open": "o",
+  "x.feed.image": "i",
   "x.feed.comments": "c",
   "x.feed.refresh": "r",
   "x.feed.toggle-expanded": "e",
@@ -93,7 +100,19 @@ const COMMENTS_BINDINGS = {
   "x.comments.next": "j",
   "x.comments.previous": "k",
   "x.comments.open": "o",
+  "x.comments.image": "i",
   "x.comments.back": "escape",
+} as const
+const IMAGE_BINDINGS = {
+  "x.image.next": "right",
+  "x.image.previous": "left",
+  "x.image.zoom-in": "+",
+  "x.image.zoom-out": "-",
+  "x.image.pan-left": "h",
+  "x.image.pan-down": "j",
+  "x.image.pan-up": "k",
+  "x.image.pan-right": "l",
+  "x.image.close": "escape",
 } as const
 const APP_BINDINGS = {
   "app.quit": "ctrl+c",
@@ -291,6 +310,7 @@ interface XApiPost {
   }
   public_metrics?: {
     reply_count?: number
+    quote_count?: number
     retweet_count?: number
     like_count?: number
   }
@@ -344,6 +364,9 @@ interface TimelineReturnState {
   scrollTop: number
   status: StyledText
 }
+
+type TweetMedia = NonNullable<TweetData["media"]>[number]
+type TweetWithQuoteCount = TweetData & { quoteCount?: number }
 
 const rendererKeymaps = new WeakMap<CliRenderer, Keymap<Renderable, KeyEvent>>()
 
@@ -409,6 +432,19 @@ let commentsGeneration = 0
 let commentsStateText: TextRenderable | null = null
 let commentsScrollListener: (() => void) | null = null
 let resizeListener: (() => void) | null = null
+let imageOverlay: BoxRenderable | null = null
+let imageViewport: BoxRenderable | null = null
+let imageRenderable: ImageRenderable | null = null
+let imageHeaderText: TextRenderable | null = null
+let imageMetricsText: TextRenderable | null = null
+let imageTweet: TweetData | null = null
+let imageItems: TweetMedia[] = []
+let imageIndex = 0
+let imageZoom = 1
+let imagePanX = 0
+let imagePanY = 0
+let imageMessage = ""
+let imageFallbackSource: string | null = null
 let twitterClientFactory = (options: ConstructorParameters<typeof TwitterClient>[0]) => new TwitterClient(options)
 let openExternalUrl = launchUrl
 
@@ -601,7 +637,7 @@ function mapOfficialPosts(response: XApiResponse<XApiPost[]>, fallbackAuthor: XA
   const includedTweets = new Map((response.includes?.tweets ?? []).map((tweet) => [tweet.id, tweet]))
   const mapPost = (post: XApiPost, authorFallback: XApiUser, hydrateQuote: boolean): TweetData => {
     const author = (post.author_id ? users.get(post.author_id) : undefined) ?? authorFallback
-    const tweet: TweetData & { wrapperUrls?: string[] } = {
+    const tweet: TweetWithQuoteCount & { wrapperUrls?: string[] } = {
       id: post.id,
       text: post.text,
       author: {
@@ -612,6 +648,7 @@ function mapOfficialPosts(response: XApiResponse<XApiPost[]>, fallbackAuthor: XA
       authorId: post.author_id,
       createdAt: post.created_at,
       replyCount: post.public_metrics?.reply_count,
+      quoteCount: post.public_metrics?.quote_count,
       retweetCount: post.public_metrics?.retweet_count,
       likeCount: post.public_metrics?.like_count,
       media: mapOfficialMedia(post, mediaByKey),
@@ -731,6 +768,7 @@ function formatKeyLabel(key: string): string {
 type CommandName =
   | keyof typeof FEED_BINDINGS
   | keyof typeof COMMENTS_BINDINGS
+  | keyof typeof IMAGE_BINDINGS
   | keyof typeof APP_BINDINGS
   | keyof typeof VIEW_BINDINGS
   | "x.modal.back"
@@ -744,9 +782,11 @@ function formatCommandKey(command: CommandName): string {
         ? FEED_BINDINGS[command as keyof typeof FEED_BINDINGS]
         : command in COMMENTS_BINDINGS
           ? COMMENTS_BINDINGS[command as keyof typeof COMMENTS_BINDINGS]
-          : command in APP_BINDINGS
-            ? APP_BINDINGS[command as keyof typeof APP_BINDINGS]
-            : VIEW_BINDINGS[command as keyof typeof VIEW_BINDINGS]
+          : command in IMAGE_BINDINGS
+            ? IMAGE_BINDINGS[command as keyof typeof IMAGE_BINDINGS]
+            : command in APP_BINDINGS
+              ? APP_BINDINGS[command as keyof typeof APP_BINDINGS]
+              : VIEW_BINDINGS[command as keyof typeof VIEW_BINDINGS]
   return (
     formatCommandBindings(bindings, {
       keyNameAliases: { escape: "esc" },
@@ -842,12 +882,15 @@ function addCompactFooterItem(
 function updateFooter(): void {
   if (!footer) return
   clearChildren(footer)
-  if ((currentRenderer?.width ?? 100) < 82) {
+  const terminalWidth = currentRenderer?.width ?? 100
+  if (terminalWidth < 82) {
     if (currentView === "comments") {
       addCompactFooterItem("x-footer-back", "back", closeCommentsView)
+      addCompactFooterItem("x-footer-image", "image", openImageView)
       addCompactFooterItem("x-footer-logs", "logs", toggleConsole, COLORS.secondary)
     } else {
       addCompactFooterItem("x-footer-comments", "comments", openCommentsView)
+      if (terminalWidth >= 36) addCompactFooterItem("x-footer-image", "image", openImageView)
       addCompactFooterItem(
         "x-footer-refresh",
         "refresh",
@@ -865,6 +908,7 @@ function updateFooter(): void {
     const selectionKeys = `${formatCommandKey("x.comments.next")}/${formatCommandKey("x.comments.previous")}`
     addFooterItem("x-footer-comment-select", selectionKeys, "select")
     addFooterItem("x-footer-comment-open", formatCommandKey("x.comments.open"), "open")
+    addFooterItem("x-footer-image", formatCommandKey("x.comments.image"), "image", COLORS.accent, openImageView)
     addFooterItem("x-footer-back", formatCommandKey("x.comments.back"), "back", COLORS.accent, closeCommentsView)
     addFooterItem("x-footer-logs", formatCommandKey("app.console"), "logs", COLORS.secondary, toggleConsole)
     return
@@ -873,6 +917,7 @@ function updateFooter(): void {
   const selectionKeys = `${formatCommandKey("x.feed.next")}/${formatCommandKey("x.feed.previous")}`
   addFooterItem("x-footer-select", selectionKeys, "select")
   addFooterItem("x-footer-comments", formatCommandKey("x.feed.comments"), "comments", COLORS.accent, openCommentsView)
+  addFooterItem("x-footer-image", formatCommandKey("x.feed.image"), "image", COLORS.accent, openImageView)
   addFooterItem("x-footer-open", formatCommandKey("x.feed.open"), "open")
   addFooterItem("x-footer-refresh", formatCommandKey("x.feed.refresh"), "refresh", COLORS.green, () => {
     void refreshTimeline()
@@ -1162,7 +1207,7 @@ function addPostMetrics(
 }
 
 interface ImageFailureContext {
-  kind: "avatar" | "media" | "quoted-avatar" | "quoted-media"
+  kind: "avatar" | "media" | "quoted-avatar" | "quoted-media" | "viewer-media"
   postId: string
   mediaIndex?: number
   mediaType?: "photo" | "video" | "animated_gif"
@@ -1216,6 +1261,223 @@ function reportImageFailure(context: ImageFailureContext, error: unknown): strin
   if (status !== undefined && error instanceof ImageLoadError) return `HTTP ${status}`
   if (code) return code.replaceAll("-", " ").toUpperCase()
   return name === "Error" ? "LOAD ERROR" : name.toUpperCase()
+}
+
+function viewableImages(tweet: TweetData): TweetMedia[] {
+  return (tweet.media ?? []).filter((media) => media.type === "photo" && Boolean(media.url || media.previewUrl))
+}
+
+function tweetQuoteCount(tweet: TweetData): number {
+  const direct = (tweet as TweetWithQuoteCount).quoteCount
+  const raw = tweet._raw as { legacy?: { quote_count?: unknown } } | undefined
+  const value = direct ?? raw?.legacy?.quote_count
+  return typeof value === "number" && Number.isFinite(value) ? value : 0
+}
+
+function selectedImageTweet(): TweetData | null {
+  if (currentView === "comments") return commentTweets[selectedCommentIndex] ?? commentsRootTweet
+  return timelineTweets[selectedIndex] ?? null
+}
+
+function updateImageViewText(): void {
+  if (!imageTweet || !imageHeaderText || !imageMetricsText) return
+  const position = imageItems.length > 1 ? `${imageIndex + 1}/${imageItems.length} · ` : ""
+  const status = imageMessage ? ` · ${imageMessage}` : ""
+  imageHeaderText.content = t`${bold(fg(COLORS.primary)(`IMAGE · ${position}${Math.round(imageZoom * 100)}%`))}${fg(COLORS.secondary)(`   ${formatCommandKey("x.image.previous")}/${formatCommandKey("x.image.next")} image   ${formatCommandKey("x.image.zoom-in")}/${formatCommandKey("x.image.zoom-out")} zoom   H/J/K/L pan   ${formatCommandKey("x.image.close")} back${status}`)}`
+  imageMetricsText.content = t`${fg(COLORS.secondary)(`${compactCount(imageTweet.replyCount)} replies   ${compactCount(tweetQuoteCount(imageTweet))} quotes   ${compactCount(imageTweet.likeCount)} likes`)}`
+}
+
+function layoutImageView(width?: number, height?: number): void {
+  if (!imageViewport || !imageRenderable) return
+  const viewportWidth = Math.max(1, width ?? imageViewport.width)
+  const viewportHeight = Math.max(1, height ?? imageViewport.height)
+  const imageWidth = Math.max(1, Math.round(viewportWidth * imageZoom))
+  const imageHeight = Math.max(1, Math.round(viewportHeight * imageZoom))
+  const fitted = imageRenderable.image
+    ? imageRenderable.getFittedSize(imageWidth, imageHeight)
+    : { width: imageWidth, height: imageHeight }
+  const fittedLeft = Math.round((viewportWidth - imageWidth) / 2) + Math.floor((imageWidth - fitted.width) / 2)
+  const fittedTop = Math.round((viewportHeight - imageHeight) / 2) + Math.floor((imageHeight - fitted.height) / 2)
+  const minPanX = fitted.width > viewportWidth ? viewportWidth - fitted.width - fittedLeft : 0
+  const maxPanX = fitted.width > viewportWidth ? -fittedLeft : 0
+  const minPanY = fitted.height > viewportHeight ? viewportHeight - fitted.height - fittedTop : 0
+  const maxPanY = fitted.height > viewportHeight ? -fittedTop : 0
+  imagePanX = Math.max(minPanX, Math.min(maxPanX, imagePanX))
+  imagePanY = Math.max(minPanY, Math.min(maxPanY, imagePanY))
+  imageRenderable.width = imageWidth
+  imageRenderable.height = imageHeight
+  imageRenderable.left = Math.round((viewportWidth - imageWidth) / 2 + imagePanX)
+  imageRenderable.top = Math.round((viewportHeight - imageHeight) / 2 + imagePanY)
+}
+
+function loadImageViewItem(): void {
+  if (!imageRenderable || !imageTweet) return
+  const media = imageItems[imageIndex]
+  const source = media?.url || media?.previewUrl
+  if (!media || !source) return
+  imageMessage = "LOADING"
+  imageFallbackSource = media.previewUrl && media.previewUrl !== source ? media.previewUrl : null
+  imageRenderable.source = undefined
+  imageRenderable.source = source
+  updateImageViewText()
+}
+
+function openImageView(tweet: TweetData | null = selectedImageTweet(), media?: TweetMedia): boolean {
+  if (
+    !tweet ||
+    !root ||
+    !imageOverlay ||
+    !imageRenderable ||
+    !currentRenderer ||
+    imageOverlay.visible ||
+    commentsPreparing
+  )
+    return false
+  const items = viewableImages(tweet)
+  if (items.length === 0) return false
+  const nextIndex = media ? items.indexOf(media) : 0
+  if (nextIndex < 0) return false
+
+  imageTweet = tweet
+  imageItems = items
+  imageIndex = nextIndex
+  imageZoom = 1
+  imagePanX = 0
+  imagePanY = 0
+  layoutImageView(currentRenderer.width, Math.max(1, currentRenderer.height - IMAGE_CHROME_ROWS))
+  loadImageViewItem()
+  root.visible = false
+  imageOverlay.visible = true
+  imageOverlay.focus()
+  return true
+}
+
+function closeImageView(): boolean {
+  if (!imageOverlay?.visible || !root || !imageRenderable) return false
+  imageRenderable.source = undefined
+  root.visible = true
+  imageOverlay.visible = false
+  imageTweet = null
+  imageItems = []
+  imageMessage = ""
+  imageFallbackSource = null
+  if (currentView === "comments") commentsFeed?.focus()
+  else feed?.focus()
+  return true
+}
+
+function navigateImageView(delta: number): boolean {
+  if (!imageOverlay?.visible || imageItems.length === 0) return false
+  const nextIndex = Math.max(0, Math.min(imageItems.length - 1, imageIndex + delta))
+  if (nextIndex === imageIndex) return true
+  imageIndex = nextIndex
+  imageZoom = 1
+  imagePanX = 0
+  imagePanY = 0
+  layoutImageView()
+  loadImageViewItem()
+  return true
+}
+
+function zoomImageView(delta: number): boolean {
+  if (!imageOverlay?.visible) return false
+  imageZoom = Math.max(IMAGE_MIN_ZOOM, Math.min(IMAGE_MAX_ZOOM, imageZoom + delta))
+  layoutImageView()
+  updateImageViewText()
+  return true
+}
+
+function panImageView(deltaX: number, deltaY: number): boolean {
+  if (!imageOverlay?.visible) return false
+  imagePanX += deltaX
+  imagePanY += deltaY
+  layoutImageView()
+  return true
+}
+
+function createImageView(renderer: CliRenderer): BoxRenderable {
+  imageOverlay = new BoxRenderable(renderer, {
+    id: "x-image-view",
+    position: "absolute",
+    left: 0,
+    top: 0,
+    width: "100%",
+    height: "100%",
+    zIndex: 200,
+    backgroundColor: COLORS.background,
+    flexDirection: "column",
+    focusable: true,
+    visible: false,
+  })
+  imageViewport = new BoxRenderable(renderer, {
+    id: "x-image-viewport",
+    width: "100%",
+    flexGrow: 1,
+    overflow: "hidden",
+    onSizeChange() {
+      layoutImageView()
+    },
+  })
+  imageRenderable = new ImageRenderable(renderer, {
+    id: "x-image-view-image",
+    position: "absolute",
+    left: 0,
+    top: 0,
+    width: 1,
+    height: 1,
+    fit: "fit",
+    protocol: "auto",
+    onLoad() {
+      imageMessage = ""
+      layoutImageView()
+      updateImageViewText()
+    },
+    onError(error) {
+      const media = imageItems[imageIndex]
+      const viewer = imageRenderable
+      const source = viewer?.source
+      if (typeof source === "string" && media && imageTweet) {
+        const reason = reportImageFailure(
+          { kind: "viewer-media", postId: imageTweet.id, mediaIndex: imageIndex, mediaType: media.type, source },
+          error,
+        )
+        if (imageFallbackSource && viewer) {
+          const fallback = imageFallbackSource
+          imageFallbackSource = null
+          imageMessage = "LOADING PREVIEW"
+          viewer.source = undefined
+          viewer.source = fallback
+          updateImageViewText()
+          return
+        }
+        imageMessage = `UNAVAILABLE · ${reason}`
+      } else imageMessage = "UNAVAILABLE"
+      updateImageViewText()
+    },
+  })
+  imageHeaderText = new TextRenderable(renderer, {
+    id: "x-image-view-header",
+    width: "100%",
+    height: 1,
+    flexShrink: 0,
+    bg: "transparent",
+    wrapMode: "none",
+    selectable: false,
+  })
+  imageMetricsText = new TextRenderable(renderer, {
+    id: "x-image-view-metrics",
+    width: "100%",
+    height: 1,
+    flexShrink: 0,
+    bg: "transparent",
+    wrapMode: "none",
+    selectable: false,
+  })
+  imageOverlay.add(imageHeaderText)
+  imageViewport.add(imageRenderable)
+  imageOverlay.add(imageViewport)
+  imageOverlay.add(imageMetricsText)
+  return imageOverlay
 }
 
 function addPostAuthor(card: BoxRenderable, tweet: TweetData, postIndex: number, idPrefix: string = "x-post"): void {
@@ -1278,6 +1540,7 @@ function addPostMedia(
   tweet: TweetData,
   postIndex: number,
   idPrefix: string = "x-post-media",
+  onOpen?: (tweet: TweetData, media: TweetMedia) => void,
 ): void {
   const mediaItems = (tweet.media ?? []).filter((media) => Boolean(media.previewUrl || media.url))
   if (mediaItems.length === 0) return
@@ -1355,6 +1618,7 @@ function addPostMedia(
       onError: handleMediaFailure,
     })
     void image.loadPromise?.catch(handleMediaFailure)
+    if (media.type === "photo" && onOpen) makeClickable(image, () => onOpen(tweet, media))
     mediaBox.add(image)
     mediaBox.add(mediaStatus)
   }
@@ -1362,7 +1626,13 @@ function addPostMedia(
   card.add(mediaBox)
 }
 
-function addQuotedPost(card: BoxRenderable, tweet: TweetData, postIndex: number, idPrefix: string = "x-post"): void {
+function addQuotedPost(
+  card: BoxRenderable,
+  tweet: TweetData,
+  postIndex: number,
+  idPrefix: string = "x-post",
+  onOpen?: (tweet: TweetData, media: TweetMedia) => void,
+): void {
   const quoted = tweet.quotedTweet
   if (!quoted) return
 
@@ -1388,7 +1658,7 @@ function addQuotedPost(card: BoxRenderable, tweet: TweetData, postIndex: number,
       selectable: true,
     }),
   )
-  addPostMedia(quoteCard, quoted, postIndex, `${idPrefix}-quote-media`)
+  addPostMedia(quoteCard, quoted, postIndex, `${idPrefix}-quote-media`, onOpen)
   card.add(quoteCard)
 }
 
@@ -1544,8 +1814,12 @@ function createPostCard(tweet: TweetData, index: number): BoxRenderable | null {
     postToggles.set(tweet.id, toggle)
     card.add(toggle)
   }
-  addPostMedia(card, tweet, index)
-  addQuotedPost(card, tweet, index)
+  const openMedia = (mediaTweet: TweetData, media: TweetMedia) => {
+    selectPost(index, false)
+    openImageView(mediaTweet, media)
+  }
+  addPostMedia(card, tweet, index, "x-post-media", openMedia)
+  addQuotedPost(card, tweet, index, "x-post", openMedia)
   addPostMetrics(card, tweet, index, "x-post", () => {
     selectPost(index, false)
     return openCommentsView()
@@ -1584,8 +1858,12 @@ function createCommentsPostCard(
       selectable: true,
     }),
   )
-  addPostMedia(card, tweet, index, `${idPrefix}-media`)
-  addQuotedPost(card, tweet, index, idPrefix)
+  const openMedia = (mediaTweet: TweetData, media: TweetMedia) => {
+    if (!isRoot) selectComment(index, false)
+    openImageView(mediaTweet, media)
+  }
+  addPostMedia(card, tweet, index, `${idPrefix}-media`, openMedia)
+  addQuotedPost(card, tweet, index, idPrefix, openMedia)
   addPostMetrics(card, tweet, index, idPrefix)
   if (!isRoot) makeClickable(card, () => selectComment(index), undefined, false)
   return card
@@ -2491,6 +2769,12 @@ function registerXKeymap(renderer: CliRenderer): Keymap<Renderable, KeyEvent> {
           },
         },
         {
+          name: "x.feed.image",
+          run() {
+            return openImageView()
+          },
+        },
+        {
           name: "x.feed.comments",
           run() {
             return openCommentsView()
@@ -2539,6 +2823,66 @@ function registerXKeymap(renderer: CliRenderer): Keymap<Renderable, KeyEvent> {
           },
         },
         {
+          name: "x.comments.image",
+          run() {
+            return openImageView()
+          },
+        },
+        {
+          name: "x.image.next",
+          run() {
+            return navigateImageView(1)
+          },
+        },
+        {
+          name: "x.image.previous",
+          run() {
+            return navigateImageView(-1)
+          },
+        },
+        {
+          name: "x.image.zoom-in",
+          run() {
+            return zoomImageView(IMAGE_ZOOM_STEP)
+          },
+        },
+        {
+          name: "x.image.zoom-out",
+          run() {
+            return zoomImageView(-IMAGE_ZOOM_STEP)
+          },
+        },
+        {
+          name: "x.image.pan-left",
+          run() {
+            return panImageView(-IMAGE_PAN_COLUMNS, 0)
+          },
+        },
+        {
+          name: "x.image.pan-down",
+          run() {
+            return panImageView(0, IMAGE_PAN_ROWS)
+          },
+        },
+        {
+          name: "x.image.pan-up",
+          run() {
+            return panImageView(0, -IMAGE_PAN_ROWS)
+          },
+        },
+        {
+          name: "x.image.pan-right",
+          run() {
+            return panImageView(IMAGE_PAN_COLUMNS, 0)
+          },
+        },
+        {
+          name: "x.image.close",
+          run() {
+            return closeImageView()
+          },
+        },
+        {
           name: "x.session.open",
           run() {
             return openSessionFlowFromFeed()
@@ -2572,6 +2916,16 @@ function registerXKeymap(renderer: CliRenderer): Keymap<Renderable, KeyEvent> {
         target: commentsFeed,
         targetMode: "focus",
         bindings: commandBindings({ ...COMMENTS_BINDINGS, ...VIEW_BINDINGS }),
+      }),
+    )
+  }
+
+  if (imageOverlay) {
+    keymapDisposers.push(
+      keymap.registerLayer({
+        target: imageOverlay,
+        targetMode: "focus",
+        bindings: commandBindings(IMAGE_BINDINGS),
       }),
     )
   }
@@ -2909,6 +3263,14 @@ export function run(renderer: CliRenderer, options: XDemoRunOptions = {}): void 
   commentsLoading = false
   commentsPreparing = false
   commentsGeneration += 1
+  imageTweet = null
+  imageItems = []
+  imageIndex = 0
+  imageZoom = 1
+  imagePanX = 0
+  imagePanY = 0
+  imageMessage = ""
+  imageFallbackSource = null
   detectedBrowserOverride = options.detectedBrowsers ? [...options.detectedBrowsers] : null
   xApiBaseUrl = options.xApiBaseUrl?.replace(/\/+$/, "") || X_API_BASE_URL
   twitterClientFactory = options.twitterClientFactory ?? ((clientOptions) => new TwitterClient(clientOptions))
@@ -3012,6 +3374,7 @@ export function run(renderer: CliRenderer, options: XDemoRunOptions = {}): void 
   feed.verticalScrollBar.on("change", feedScrollListener)
   commentsScrollListener = loadCommentsNearBottom
   commentsFeed.verticalScrollBar.on("change", commentsScrollListener)
+  const imageView = createImageView(renderer)
   registerXKeymap(renderer)
   updateHeader()
 
@@ -3024,7 +3387,11 @@ export function run(renderer: CliRenderer, options: XDemoRunOptions = {}): void 
     backgroundColor: COLORS.panel,
   })
   updateFooter()
-  resizeListener = updateFooter
+  resizeListener = () => {
+    updateFooter()
+    if (imageOverlay?.visible && currentRenderer)
+      layoutImageView(currentRenderer.width, Math.max(1, currentRenderer.height - IMAGE_CHROME_ROWS))
+  }
   renderer.on(CliRenderEvents.RESIZE, resizeListener)
 
   root.add(header)
@@ -3032,6 +3399,7 @@ export function run(renderer: CliRenderer, options: XDemoRunOptions = {}): void 
   root.add(viewStack)
   root.add(footer)
   renderer.root.add(root)
+  renderer.root.add(imageView)
   feed.focus()
   const rememberedSourceId = loadRememberedBrowserSource()
   const rememberedSource = rememberedSourceId
@@ -3071,6 +3439,10 @@ export function destroy(): void {
   commentsHasMore = false
   commentsLoading = false
   commentsPreparing = false
+  imageTweet = null
+  imageItems = []
+  imageMessage = ""
+  imageFallbackSource = null
 
   while (keymapDisposers.length > 0) keymapDisposers.pop()?.()
   modalRoutes = []
@@ -3084,6 +3456,8 @@ export function destroy(): void {
   feedScrollListener = null
   commentsScrollListener = null
   resizeListener = null
+  if (imageRenderable) imageRenderable.source = undefined
+  imageOverlay?.destroyRecursively()
   feed?.destroyRecursively()
   commentsFeed?.destroyRecursively()
   root?.destroyRecursively()
@@ -3092,6 +3466,11 @@ export function destroy(): void {
   root = null
   feed = null
   commentsFeed = null
+  imageOverlay = null
+  imageViewport = null
+  imageRenderable = null
+  imageHeaderText = null
+  imageMetricsText = null
   statusText = null
   headerText = null
   headerHomeText = null
