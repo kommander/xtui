@@ -20,8 +20,8 @@
     "lint": "oxlint ."
   },
   "dependencies": {
-    "@opentui/core": "0.5.0",
-    "@opentui/keymap": "0.5.0",
+    "@opentui/core": "0.5.1",
+    "@opentui/keymap": "0.5.1",
     "@steipete/bird": "0.8.0",
     "@steipete/sweet-cookie": "0.4.1",
     "web-tree-sitter": "0.25.10"

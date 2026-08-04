@@ -90,7 +90,7 @@ bun scripts/build.ts bun-windows-x64
 Before cross-compiling, install OpenTUI's optional native packages for all required targets:
 
 ```bash
-bun install --os="*" --cpu="*" @opentui/core@0.5.0
+bun install --os="*" --cpu="*" @opentui/core@0.5.1
 ```
 
 Cross-compiled executables must be smoke-tested on their target OS and architecture.

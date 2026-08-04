@@ -10,7 +10,6 @@ import {
   ImageRenderable,
   InputRenderable,
   InputRenderableEvents,
-  RenderableEvents,
   ScrollBoxRenderable,
   SelectRenderable,
   SelectRenderableEvents,
@@ -44,7 +43,6 @@ import { existsSync, readdirSync } from "node:fs"
 import { homedir } from "node:os"
 import { isAbsolute, join } from "node:path"
 import { loadRememberedBrowserSource, rememberBrowserSource, type BrowserSourceId } from "./browser-preference.js"
-import { fetchXImageBytes, xImageUrls } from "./x-image.js"
 
 export type { BrowserSourceId } from "./browser-preference.js"
 
@@ -1053,34 +1051,6 @@ function reportImageFailure(context: ImageFailureContext, error: unknown): strin
   return name === "Error" ? "LOAD ERROR" : name.toUpperCase()
 }
 
-function loadImageRenderable(
-  image: ImageRenderable,
-  source: string,
-  kind: "avatar" | "media",
-  onFailure: (error: unknown) => void,
-): void {
-  const controller = new AbortController()
-  image.once(RenderableEvents.DESTROYED, () => controller.abort())
-  void (async () => {
-    let lastError: unknown = new Error("No image source was available.")
-    for (const candidate of xImageUrls(source, kind)) {
-      try {
-        const bytes = await fetchXImageBytes(candidate, controller.signal)
-        if (image.isDestroyed) return
-        image.source = bytes
-        await image.loadPromise
-        if (image.isDestroyed) return
-        if (!image.loadError) return
-        lastError = image.loadError
-      } catch (error) {
-        if (controller.signal.aborted || image.isDestroyed) return
-        lastError = error
-      }
-    }
-    onFailure(lastError)
-  })()
-}
-
 function addPostAuthor(card: BoxRenderable, tweet: TweetData, postIndex: number, idPrefix: string = "x-post"): void {
   const avatarUrl = profileImageUrl(tweet)
   const row = new BoxRenderable(card.ctx, {
@@ -1110,15 +1080,17 @@ function addPostAuthor(card: BoxRenderable, tweet: TweetData, postIndex: number,
     }
     avatar = new ImageRenderable(card.ctx, {
       id: `${idPrefix}-avatar-${postIndex}`,
+      source: avatarUrl,
       width: 4,
       height: 2,
       marginRight: 1,
       flexShrink: 0,
       fit: "cover",
       protocol: "auto",
+      onError: handleAvatarFailure,
     })
+    void avatar.loadPromise?.catch(handleAvatarFailure)
     row.add(avatar)
-    loadImageRenderable(avatar, avatarUrl, "avatar", handleAvatarFailure)
   }
   row.add(
     new TextRenderable(card.ctx, {
@@ -1198,6 +1170,7 @@ function addPostMedia(
 
     image = new ImageRenderable(card.ctx, {
       id: `${idPrefix}-image-${postIndex}-${mediaIndex}`,
+      source,
       width: "100%",
       height: MEDIA_MIN_ROWS,
       flexShrink: 0,
@@ -1212,10 +1185,11 @@ function addPostMedia(
         mediaStatus.visible = media.type !== "photo"
         scheduleHeightUpdate()
       },
+      onError: handleMediaFailure,
     })
+    void image.loadPromise?.catch(handleMediaFailure)
     mediaBox.add(image)
     mediaBox.add(mediaStatus)
-    loadImageRenderable(image, source, "media", handleMediaFailure)
   }
 
   card.add(mediaBox)
