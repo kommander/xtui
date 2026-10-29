@@ -1,76 +1,82 @@
 # xtooey
 
-A compact, read-only, keyboard-driven X client built with [OpenTUI](https://opentui.com). It renders timelines, quoted posts, profile pictures, and post media directly in the terminal.
+X in your terminal, no cap. Built with [OpenTUI](https://opentui.com), xtooey keeps it compact and keyboard-first while serving up timelines, quoted posts, profile pics, and media right where you work.
 
-Xtooey does not post, reply, like, repost, or otherwise modify your X account.
+It's strictly read-only: no posting, replying, liking, reposting, or switching up your X account. Scroll the feed, catch the vibe, and jump to x.com when you want to do more.
 
-## Features
+## What's the move?
 
-- Official X API v2 mode with OAuth user tokens
-- Optional browser-session mode using cookies from Chrome, Brave, Edge, Firefox, or Safari (macOS only)
-- Home/For You and Following timelines where the selected API supports them
-- Infinite scrolling with visible prefetch status
+- Official X API v2 mode with your OAuth user token
+- Optional cookie mode with Chrome, Brave, Edge, Firefox, or Safari (macOS only)
+- Home/For You and Following timelines, depending on what the selected API actually offers
+- Infinite scrolling with prefetch status, so you know when more heat is loading
 - Native Kitty, Sixel, and terminal-block image rendering
-- Quoted posts, profile images, mention highlighting, and long-post expansion
-- Paginated direct comments with exact return to the previous timeline position
-- Keyboard-first navigation with mouse support for visible controls
+- Quoted posts, profile pics, highlighted mentions, and long-post expansion
+- Paginated direct comments, then right back to your exact spot in the timeline
+- Keyboard-first navigation with mouse support for the controls on screen
 
-## Requirements
+## What you need
 
 - [Bun](https://bun.sh) 1.3 or newer
-- A terminal with Kitty or Sixel graphics for native images; other terminals use block rendering
+- A terminal with Kitty or Sixel graphics for native images; other terminals get block rendering
 
-## Install
+## Get it
 
-Run directly from npm:
+Fire it up straight from npm:
 
 ```bash
 bunx xtooey
 ```
 
-Or install the command globally. Bun is still required because the published CLI runs its TypeScript source with the Bun shebang.
+Or install the command globally. You still need Bun because the published CLI runs its TypeScript source with the Bun shebang.
 
 ```bash
 bun add --global xtooey
 xtooey
 ```
 
-`npm install --global xtooey` also works when Bun is installed and available on `PATH`.
+`npm install --global xtooey` works too, as long as Bun is installed and on your `PATH`.
 
-## Development
+## Run it from source
 
-Install dependencies and run from a checkout:
+Clone your checkout, grab the dependencies, and let it rip:
 
 ```bash
 bun install
 bun run start
 ```
 
-For automatic restart:
+Want automatic restarts while you cook?
 
 ```bash
 bun run dev
 ```
 
-## Authentication
+## Get connected
 
-### Official X API
+### The official X API route
 
-The recommended mode uses a user-context OAuth 2.0 access token with `tweet.read` and `users.read` scopes. It uses X's documented reverse-chronological Following timeline. X does not publish a For You endpoint in API v2. Comments use Recent Search and therefore cover direct replies created during the last seven days.
+This is the recommended route. Bring a user-context OAuth 2.0 access token with `tweet.read` and `users.read` scopes. You'll get X's documented reverse-chronological Following timeline.
 
-### Browser session
+Heads-up: X doesn't publish a For You endpoint in API v2. Comments run through Recent Search, so they only cover direct replies from the last seven days.
 
-Browser mode reads `auth_token` and `ct0` from a browser you select. Xtooey scans that browser's profiles and uses the first profile containing both cookies. Safari is supported on macOS only. You can also paste `auth_token=...; ct0=...` directly instead of using browser detection.
+### The browser-session route
 
-Credentials stay in memory and are never written or logged. Official API tokens and manually pasted cookies must be entered again after a restart. Browser mode uses X's undocumented web GraphQL API through the deprecated `@steipete/bird` package for timelines and direct replies. X warns that non-API website automation may result in permanent account suspension. Use it only if you accept that risk.
+Browser mode pulls `auth_token` and `ct0` from a browser you pick. Xtooey scans that browser's profiles and uses the first one with both cookies. Safari is macOS-only. You can also paste `auth_token=...; ct0=...` yourself and skip browser detection.
 
-Your OS may request Keychain, keyring, DPAPI, or browser-cookie-file access. Select the browser that owns the X session you intend to use.
+Credentials stay in memory and never get written or logged. Official API tokens and manually pasted cookies don't survive a restart, so you'll need to enter those again.
 
-After you choose a browser, xtooey remembers only that browser's ID in `browser-source` alongside `config.jsonc` and tries its cookie store automatically on later starts when it is still detected. Choosing the official API or manual cookies clears this preference. Press `A` from the feed to open the full connection flow and replace it with another browser, manual cookies, or the official API.
+Real talk: browser mode uses X's undocumented web GraphQL API through the deprecated `@steipete/bird` package for timelines and direct replies. X warns that non-API website automation can get your account permanently suspended. Only roll with this mode if you accept that risk.
 
-Xtooey may stop a cookie session after authentication, rate-limit, or account-control responses. Resolve any account prompt on x.com, then press `A` to reconnect.
+Your OS might ask for Keychain, keyring, DPAPI, or browser-cookie-file access. Pick the browser holding the X session you actually want to use.
 
-## Controls
+After you pick a browser, xtooey remembers only its ID in `browser-source` next to `config.jsonc`. On later starts, it tries that cookie store automatically if it's still detected. Picking the official API or manual cookies clears that preference. Hit `A` in the feed to run the full connection flow again and switch browsers, paste cookies, or go official.
+
+If xtooey gets an authentication, rate-limit, or account-control response, it may stop the cookie session. Handle any account prompt on x.com, then hit `A` to reconnect.
+
+## Run the keys
+
+Keyboard is the main character here, but the mouse still gets love.
 
 | Key           | Action                                     |
 | ------------- | ------------------------------------------ |
@@ -88,27 +94,27 @@ Xtooey may stop a cookie session after authentication, rate-limit, or account-co
 | `` ` ``       | Toggle OpenTUI's captured console/log view |
 | `Ctrl+C`      | Quit                                       |
 
-Refreshes are limited to once every 15 seconds in official API mode and once every 60 seconds in cookie mode. During the cooldown, the status line shows the remaining time.
+Don't spam `R`: refreshes are capped at once every 15 seconds in official API mode and once every 60 seconds in cookie mode. The status line shows the cooldown time left.
 
-In the image view, use `Left` / `Right` to move between images, `+` / `-` to zoom, `H` / `J` / `K` / `L` to pan, and `Escape` to return. The viewer opens photos only. Videos and animated GIFs appear as preview images; xtooey does not play video or animation.
+In image view, use `Left` / `Right` to switch images, `+` / `-` to zoom, `H` / `J` / `K` / `L` to pan, and `Escape` to bounce back. The viewer opens photos only. Videos and animated GIFs show up as preview images; xtooey doesn't play video or animation.
 
-With a mouse, click posts or comments to select them, click an image to open it, click visible action labels and Show More/Less links, and use the wheel or an enabled scrollbar to scroll. Opening a selected post or comment on x.com remains keyboard-only with `O`, which uses `open` on macOS, `cmd start` on Windows, and `xdg-open` on other platforms.
+With a mouse, click posts or comments to select them, click an image to open it, hit the visible action labels and Show More/Less links, and use the wheel or an enabled scrollbar to scroll. Opening a post or comment on x.com stays keyboard-only with `O`. That uses `open` on macOS, `cmd start` on Windows, and `xdg-open` everywhere else.
 
-Image failures are logged to OpenTUI's console with sanitized URLs, post/media context, error code, HTTP status, cause, and stack. Press backtick to inspect them.
+If an image flops, xtooey logs the details to OpenTUI's console with sanitized URLs, post/media context, error code, HTTP status, cause, and stack. Hit backtick to see what's good.
 
-## Configuration
+## Make it yours
 
-xtooey reads one optional JSONC file. JSON is also supported because it is a subset of JSONC.
+Xtooey reads one optional JSONC file. That's it. JSON works too because it's a subset of JSONC.
 
 - macOS and Linux: `$XDG_CONFIG_HOME/xtooey/config.jsonc`, or `~/.config/xtooey/config.jsonc` when `XDG_CONFIG_HOME` is unset or relative
 - Windows: `%APPDATA%\xtooey\config.jsonc`, falling back to `~/.config/xtooey/config.jsonc`
 
-There are no project-local files or merged configuration layers. Unknown or invalid fields are ignored independently, valid sibling fields still apply, and defaults are used for anything rejected. If the file cannot be parsed as JSONC, the entire configuration falls back to defaults. xtooey logs each problem and opens OpenTUI's console automatically.
+No project-local files, no merged config layers. Unknown or invalid fields get ignored one by one, valid sibling fields still apply, and rejected values fall back to defaults. If the whole file can't parse as JSONC, everything falls back to defaults. Xtooey logs each issue and pops open OpenTUI's console automatically.
 
 ```jsonc
 {
   "$schema": "https://raw.githubusercontent.com/kommander/xtui/v0.1.0/xtooey.schema.json",
-  // Hidden by default. Scrolling still works with keys and the mouse wheel.
+  // Hidden by default. Keys and the mouse wheel still scroll just fine.
   "scrollbar": true,
   "keybindings": {
     "x.feed.next": "down",
@@ -118,11 +124,11 @@ There are no project-local files or merged configuration layers. Unknown or inva
 }
 ```
 
-Every application command can be rebound to one OpenTUI key stroke. Single keys and modifier chords such as `ctrl+q` are supported; multi-stroke sequences are rejected with a fallback to that command's default.
+Every app command takes one OpenTUI key stroke. Single keys and modifier chords like `ctrl+q` are good; multi-stroke sequences get rejected and that command keeps its default.
 
-`app.bindings` is global. It accepts `?` or a non-text key/chord such as `f1` or `ctrl+?`; printable custom keys, `escape`, and keys used by another command fall back to `?` so help never blocks text entry or another action.
+`app.bindings` is global. Give it `?` or a non-text key/chord like `f1` or `ctrl+?`. Printable custom keys, `escape`, and keys already claimed by another command fall back to `?`, so help never blocks text entry or another move.
 
-While a credential input is focused, printable keys type into the field instead of triggering `x.modal.back`, `app.console`, or `app.quit`; modifier chords still work.
+While a credential input has focus, printable keys type into the field instead of triggering `x.modal.back`, `app.console`, or `app.quit`. Modifier chords still work.
 
 | Command                  | Default  |
 | ------------------------ | -------- |
@@ -154,19 +160,19 @@ While a credential input is focused, printable keys type into the field instead 
 | `app.console`            | `` ` ``  |
 | `app.quit`               | `ctrl+c` |
 
-Run `bun run schema` after changing the runtime schema to regenerate `xtooey.schema.json`.
+After changing the runtime schema, run `bun run schema` to regenerate `xtooey.schema.json`.
 
-## Build
+## Build your own
 
-Build a standalone executable for the current host:
+Need a standalone executable for your machine? Run:
 
 ```bash
 bun run build
 ```
 
-The executable is written to `dist/` with its platform and architecture in the filename.
+The executable lands in `dist/` with the platform and architecture in its filename.
 
-Explicit Bun targets are supported:
+Explicit Bun targets work too:
 
 ```bash
 bun scripts/build.ts bun-darwin-arm64
@@ -175,19 +181,19 @@ bun scripts/build.ts bun-linux-x64-musl
 bun scripts/build.ts bun-windows-x64
 ```
 
-Before cross-compiling, install OpenTUI's optional native packages for all required targets:
+Before cross-compiling, grab OpenTUI's optional native packages for every target you need:
 
 ```bash
 bun install --os="*" --cpu="*" @opentui/core@0.5.1
 ```
 
-Cross-compiled executables must be smoke-tested on their target OS and architecture.
+Give every cross-compiled executable a smoke test on its actual target OS and architecture. Don't skip that.
 
-## Releasing
+## Ship it
 
-Production npm releases use npm Trusted Publishing from GitHub Actions. See [DEV.md](DEV.md) for development commands, npm/GitHub setup, and the release procedure.
+Production npm releases go through npm Trusted Publishing from GitHub Actions. Peep [DEV.md](DEV.md) for development commands, npm/GitHub setup, and the full release procedure.
 
-## Development Checks
+## Check your work
 
 ```bash
 bun run test
@@ -197,25 +203,22 @@ bun run lint
 bun run package:smoke
 ```
 
-Use `bun run release:check` for the complete pre-release validation, including all checks above and an npm pack preview.
+Before a release, run `bun run release:check` for the whole spread: every check above plus an npm pack preview.
 
-The application tests use OpenTUI's native in-memory renderer with keyboard and mouse drivers. Official X API requests go to a local HTTP server; the suite does not access X or local browser sessions. CI runs the tests and package smoke check on Ubuntu, macOS, and Windows.
+The app tests use OpenTUI's native in-memory renderer with keyboard and mouse drivers. Official X API requests hit a local HTTP server; the suite never touches X or your local browser sessions. CI runs the tests and package smoke check on Ubuntu, macOS, and Windows.
 
-## OpenTUI Development Skill
+## OpenTUI development skill
 
-Use OpenTUI's official agent skill for development in this repository. It contains the current component, lifecycle,
-layout, keymap, native-image, and standalone-build guidance that coding agents should follow before changing the app.
+If an agent is cooking in this repo, have it use OpenTUI's official agent skill. It's packed with current guidance on components, lifecycle, layout, keymaps, native images, and standalone builds.
 
-Install it locally for all supported agents from the repository root:
+Install it locally for every supported agent from the repo root:
 
 ```bash
 npx skills add anomalyco/opentui --skill opentui --agent '*' -y
 ```
 
-The generated skill directories and `skills-lock.json` are intentionally gitignored. Each developer or agent workspace
-should install its own copy. When using an AI coding agent, ask it to load and follow the `opentui` skill before planning
-or implementing OpenTUI changes.
+The generated skill directories and `skills-lock.json` stay gitignored on purpose. Each developer or agent workspace installs its own copy. When you're working with an AI coding agent, tell it to load and follow the `opentui` skill before planning or implementing OpenTUI changes.
 
 ## License
 
-MIT
+MIT. Do your thing.
